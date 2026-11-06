@@ -92,3 +92,86 @@ disconnect, and receiver error states. The initial target is 5–10 FPS at
 There is currently no resolution negotiation, frame-rate control, touch input,
 Windows sender, virtual display driver, or physical-device performance test.
 The receiver accepts one client at a time and uses a 4 MiB maximum JPEG payload.
+
+
+
+Window 1 — Connect tablet and install APK
+1. Navigate to ADB
+cd F:\platform-tools
+
+
+2. Check whether the tablet is detected
+.\adb.exe devices
+
+
+Expected:
+List of devices attached
+200804115407093    device
+
+
+If it says unauthorized, unlock the tablet and accept the USB debugging prompt.
+
+If no device appears, reconnect the USB cable and run .\adb.exe devices again.
+
+3. Restart ADB connection
+.\adb.exe kill-server
+.\adb.exe start-server
+.\adb.exe devices
+
+
+4. Install the updated APK
+
+Replace the path with your actual downloaded APK location:
+.\adb.exe install -r "C:\Users\YOUR_USERNAME\Downloads\app-debug.apk"
+
+
+Expected:
+Success
+
+
+5. Launch the tablet application
+.\adb.exe shell am force-stop com.voidcrew.micromaxdisplay
+.\adb.exe shell monkey -p com.voidcrew.micromaxdisplay 1
+
+
+6. Establish USB port forwarding
+.\adb.exe forward tcp:27183 tcp:27183
+
+
+Verify:
+.\adb.exe forward --list
+
+
+Expected:
+200804115407093 tcp:27183 tcp:27183
+
+
+7. Clear old logs and start monitoring
+.\adb.exe logcat -c
+.\adb.exe logcat -s FrameRenderer:D AndroidRuntime:E
+
+
+Keep this window open.
+
+Window 2 — Start Windows desktop streaming
+1. Navigate to the project
+cd F:\Mission_P_280
+
+
+2. Verify Pillow is installed
+py -m pip show Pillow
+
+
+If it is missing:
+py -m pip install Pillow
+
+
+3. Start the sender
+py windows_sender.py
+
+
+Expected:
+Connecting to Micromax P280...
+Connected to tablet!
+Streaming desktop. Press Ctrl+C to stop.
+Frames: 10 | JPEG size: XX KB
