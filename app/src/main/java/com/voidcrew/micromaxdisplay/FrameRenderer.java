@@ -1,5 +1,6 @@
 package com.voidcrew.micromaxdisplay;
 
+import android.util.Log;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -25,6 +26,8 @@ public final class FrameRenderer extends SurfaceView implements SurfaceHolder.Ca
     }
 
     public void displayFrame(Bitmap frame) {
+        Log.d("FrameRenderer", "Received bitmap: "
+            + (frame == null ? "NULL" : frame.getWidth() + "x" + frame.getHeight()));
         if (frame == null || frame.isRecycled()) {
             return;
         }
@@ -60,6 +63,7 @@ public final class FrameRenderer extends SurfaceView implements SurfaceHolder.Ca
 
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+        Log.d("FrameRenderer", "Surface created");
         drawLatestFrame();
     }
 
@@ -75,6 +79,10 @@ public final class FrameRenderer extends SurfaceView implements SurfaceHolder.Ca
             }
             try {
                 canvas = getHolder().lockCanvas();
+                if (canvas != null) {
+                    Log.d("FrameRenderer", "Canvas: "
+                            + canvas.getWidth() + "x" + canvas.getHeight());
+                }
                 if (canvas == null) {
                     return;
                 }
