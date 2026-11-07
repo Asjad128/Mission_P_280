@@ -61,6 +61,36 @@ jobs:
           }
 
       
+      - name: Install x86 WDK components
+        shell: pwsh
+        run: |
+          nuget install Microsoft.Windows.WDK.x86 `
+            -Version 10.0.28000.2526 `
+            -OutputDirectory driver/upstream/packages `
+            -NonInteractive
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to install x86 WDK package."
+          }
+
+     
+      - name: Inspect INF verification and Prefast tools
+        shell: pwsh
+        run: |
+          $packages = "driver/upstream/packages"
+
+          Write-Host "===== INFVERIF DLL ====="
+          Get-ChildItem $packages -Recurse -Filter InfVerif.dll |
+            Select-Object -ExpandProperty FullName
+
+          Write-Host "===== WINDOWS PREFAST DLL ====="
+          Get-ChildItem $packages -Recurse -Filter WindowsPrefast.dll |
+            Select-Object -ExpandProperty FullName
+
+          Write-Host "===== X86 WDK PACKAGE ====="
+          Get-ChildItem "$packages/Microsoft.Windows.WDK.x86*" -Directory |
+            Select-Object -ExpandProperty FullName
+
       - name: Diagnose WDK tools
         shell: pwsh
         run: |
