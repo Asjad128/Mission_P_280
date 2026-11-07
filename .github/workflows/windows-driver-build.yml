@@ -98,7 +98,31 @@ jobs:
           Get-ChildItem "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c" -Recurse -Include "*.targets","*.props" |
             Select-String -Pattern "WindowsPrefast|Prefast" |
             Select-Object -First 30
+      - name: Inspect WDK architecture properties
+        shell: pwsh
+        run: |
+          $base = "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c/build"
 
+          Write-Host "===== COMMON TARGETS: INFVERIF ====="
+          $file = "$base/10.0.28000.0/WindowsDriver.common.targets"
+          $lines = Get-Content $file
+
+          for ($i = 660; $i -le 710; $i++) {
+              if ($i -lt $lines.Length) {
+                  "{0}: {1}" -f ($i + 1), $lines[$i]
+              }
+          }
+
+          Write-Host "===== WDK ROOT PROPERTY DEFINITIONS ====="
+          Get-ChildItem $base -Recurse -Include "*.props","*.targets" |
+            Select-String -Pattern "WDKBinRoot_x86|WDKBinRoot_x64|WDKContentRoot" |
+            Select-Object -First 60
+
+          Write-Host "===== PROJECT TOOL ARCHITECTURE ====="
+          Select-String `
+            -Path "driver/upstream/video/IndirectDisplay/IddSampleDriver/IddSampleDriver.vcxproj" `
+            -Pattern "PlatformToolset|WDK|VCToolArchitecture|CLToolArchitecture|DefaultToolArchitecture" `
+            -Context 1,2
       - name: Inspect x86 WDK package layout
         shell: pwsh
         run: |
