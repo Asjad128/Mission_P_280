@@ -1,0 +1,109 @@
+
+name: Windows IDD Driver Build
+
+on:
+  workflow_dispatch:
+
+  push:
+    paths:
+      - '.github/workflows/windows-driver-build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-driver:
+    name: Build Microsoft Indirect Display Driver
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout Mission P280
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned Microsoft driver sample
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/Windows-driver-samples
+          ref: d49bb7d72f3651952b2b6e4ad28d14fe2247eb69
+          path: driver/upstream
+          fetch-depth: 1
+          sparse-checkout: |
+            video/IndirectDisplay
+            packages.config
+            Directory.Build.props
+          sparse-checkout-cone-mode: false
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Verify build environment
+        shell: pwsh
+        run: |
+          Write-Host "MSBuild:"
+          msbuild -version
+
+          Write-Host "NuGet:"
+          nuget help | Select-Object -First 3
+
+          Write-Host "Sample project:"
+          Test-Path "driver/upstream/video/IndirectDisplay/IddSampleDriver/IddSampleDriver.vcxproj"
+
+      - name: Restore WDK and SDK NuGet packages
+        shell: pwsh
+        working-directory: driver/upstream
+        run: |
+          nuget restore packages.config `
+            -PackagesDirectory packages `
+            -NonInteractive
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "WDK NuGet restore failed."
+          }
+
+      - name: Build IddSampleDriver x64 Debug
+        shell: pwsh
+        run: |
+          $project = "driver/upstream/video/IndirectDisplay/IddSampleDriver/IddSampleDriver.vcxproj"
+
+          $logger = "/flp:logfile=$env:GITHUB_WORKSPACE\driver-build.log;verbosity=normal"
+
+          msbuild $project `
+            /m `
+            /p:Configuration=Debug `
+            /p:Platform=x64 `
+            /p:SignMode=Off `
+            /verbosity:minimal `
+            /fl `
+            $logger
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "IddSampleDriver compilation failed."
+          }
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $output = "driver/upstream/video/IndirectDisplay/IddSampleDriver/x64/Debug"
+
+          Write-Host "Build output:"
+          Get-ChildItem $output -Recurse -File |
+            Select-Object FullName, Length
+
+          $dll = Get-ChildItem $output -Recurse -Filter "IddSampleDriver.dll"
+
+          if (-not $dll) {
+              throw "IddSampleDriver.dll was not generated."
+          }
+
+          Write-Host "Driver DLL generated successfully."
+
+      - name: Upload driver build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: IddSampleDriver-Debug-x64
+          path: |
+            driver/upstream/video/IndirectDisplay/IddSampleDriver/x64/Debug/**
+            driver-build.log
+          if-no-files-found: warn
+          retention-days: 14
