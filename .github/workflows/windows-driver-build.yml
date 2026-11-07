@@ -154,6 +154,35 @@ jobs:
               $_.Name -match "InfVerif|WindowsPrefast|drivers\.dll"
             } |
             Select-Object -ExpandProperty FullName
+      - name: Inspect evaluated MSBuild properties
+        shell: pwsh
+        run: |
+          $project = "driver/upstream/video/IndirectDisplay/IddSampleDriver/IddSampleDriver.vcxproj"
+
+          Write-Host "===== MSBUILD VERSION ====="
+          msbuild -version
+
+          Write-Host "===== EVALUATED DRIVER PROPERTIES ====="
+          msbuild $project `
+            -nologo `
+            -p:Configuration=Debug `
+            -p:Platform=x64 `
+            -getProperty:Platform,Configuration,PlatformToolset,PreferredToolArchitecture,CLToolArchitecture,VCToolArchitecture,DefaultToolArchitecture,Processor_Architecture,WDKContentRoot,WDKBinRoot,WDKBinRoot_x86,WDKBinRoot_x64,WDKBuildFolder,TargetPlatformVersion,DriverTargetPlatform
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to inspect evaluated MSBuild properties."
+          }
+
+          Write-Host "===== MSBUILD EXECUTABLE ====="
+          Get-Command msbuild | Select-Object Source
+
+          Write-Host "===== PREFast ARCHITECTURE CONDITIONS ====="
+          $targets = "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c/build/10.0.28000.0/WindowsDriver.Common.targets"
+
+          Select-String -Path $targets `
+            -Pattern "PREfastAdditionalPlugins|CLToolArchitecture|VCToolArchitecture|DefaultToolArchitecture" `
+            -Context 1,1
+            
       - name: Inspect x86 WDK package layout
         shell: pwsh
         run: |
