@@ -175,3 +175,11 @@ Connecting to Micromax P280...
 Connected to tablet!
 Streaming desktop. Press Ctrl+C to stop.
 Frames: 10 | JPEG size: XX KB
+
+
+.\adb.exe kill-server
+.\adb.exe start-server
+.\adb.exe devices
+.\adb.exe shell monkey -p com.voidcrew.micromaxdisplay 1
+.\adb.exe forward tcp:27183 tcp:27183
+.\adb.exe forward --list
