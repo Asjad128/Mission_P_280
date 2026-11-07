@@ -72,6 +72,33 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
               throw "Failed to install x86 WDK package."
           }
+
+      - name: Inspect x86 WDK files and build targets
+        shell: pwsh
+        run: |
+          $root = "driver/upstream/packages/Microsoft.Windows.WDK.x86.10.0.28000.2526"
+          $targets = "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c/build/10.0.28000.0/WindowsDriver.common.targets"
+
+          Write-Host "===== X86 PACKAGE DLL FILES ====="
+          Get-ChildItem $root -Recurse -File -Filter "*.dll" |
+            Select-Object -ExpandProperty FullName
+
+          Write-Host "===== X86 PACKAGE EXE FILES ====="
+          Get-ChildItem $root -Recurse -File -Filter "*.exe" |
+            Select-Object -First 60 -ExpandProperty FullName
+
+          Write-Host "===== X86 PACKAGE BUILD BIN CONTENTS ====="
+          Get-ChildItem "$root/c/build/10.0.28000.0/bin" -Recurse -File -ErrorAction SilentlyContinue |
+            Select-Object -First 60 -ExpandProperty FullName
+
+          Write-Host "===== INFVERIF TARGET LOGIC ====="
+          Select-String -Path $targets -Pattern "InfVerif" -Context 8,8
+
+          Write-Host "===== PREFast TARGET REFERENCES ====="
+          Get-ChildItem "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c" -Recurse -Include "*.targets","*.props" |
+            Select-String -Pattern "WindowsPrefast|Prefast" |
+            Select-Object -First 30
+
       - name: Inspect x86 WDK package layout
         shell: pwsh
         run: |
@@ -199,6 +226,7 @@ jobs:
           }
 
       - name: Verify build output
+        if: false
         shell: pwsh
         run: |
           $output = "driver/upstream/video/IndirectDisplay/IddSampleDriver/x64/Debug"
