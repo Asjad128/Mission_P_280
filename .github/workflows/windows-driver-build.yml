@@ -123,6 +123,37 @@ jobs:
             -Path "driver/upstream/video/IndirectDisplay/IddSampleDriver/IddSampleDriver.vcxproj" `
             -Pattern "PlatformToolset|WDK|VCToolArchitecture|CLToolArchitecture|DefaultToolArchitecture" `
             -Context 1,2
+      - name: Trace WDK tool path definitions
+        shell: pwsh
+        run: |
+          $root = "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c"
+
+          Write-Host "===== INFVERIF TARGET REMAINDER ====="
+          $file = "$root/build/10.0.28000.0/WindowsDriver.common.targets"
+          $lines = Get-Content $file
+
+          for ($i = 680; $i -lt [Math]::Min(730, $lines.Length); $i++) {
+              "{0}: {1}" -f ($i + 1), $lines[$i]
+          }
+
+          Write-Host "===== ALL WDK ROOT PROPERTY DEFINITIONS ====="
+          Get-ChildItem $root -Recurse -Include "*.props","*.targets" |
+            Select-String -Pattern "WDKBinRoot|WDKContentRoot|InfVerifTool|InfVerifPath|PREfastAdditionalPlugins" |
+            Select-Object -First 150
+
+          Write-Host "===== X86 TOOL FILES ====="
+          Get-ChildItem "driver/upstream/packages/Microsoft.Windows.WDK.x86.10.0.28000.2526/c" -Recurse -File |
+            Where-Object {
+              $_.Name -match "InfVerif|WindowsPrefast|drivers\.dll"
+            } |
+            Select-Object -ExpandProperty FullName
+
+          Write-Host "===== X64 TOOL FILES ====="
+          Get-ChildItem $root -Recurse -File |
+            Where-Object {
+              $_.Name -match "InfVerif|WindowsPrefast|drivers\.dll"
+            } |
+            Select-Object -ExpandProperty FullName
       - name: Inspect x86 WDK package layout
         shell: pwsh
         run: |
