@@ -60,6 +60,43 @@ jobs:
               throw "WDK NuGet restore failed."
           }
 
+      
+      - name: Diagnose WDK tools
+        shell: pwsh
+        run: |
+          Write-Host "===== SEARCHING FOR STAMPINF ====="
+
+          $roots = @(
+            "$env:GITHUB_WORKSPACE\driver\upstream\packages",
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+            "$env:ProgramFiles\Windows Kits\10\bin"
+          )
+
+          foreach ($root in $roots) {
+            if (Test-Path $root) {
+              Write-Host "Searching: $root"
+
+              Get-ChildItem -Path $root `
+                -Filter stampinf.exe `
+                -Recurse `
+                -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty FullName
+            }
+          }
+
+          Write-Host "===== NUGET PACKAGES ====="
+
+          Get-ChildItem "driver/upstream/packages" -Directory |
+            Select-Object -ExpandProperty Name
+
+          Write-Host "===== WDK ENVIRONMENT ====="
+
+          Get-ChildItem Env: |
+            Where-Object {
+              $_.Name -match "WDK|SDK|Windows"
+            } |
+            Format-Table -AutoSize
+
       - name: Build IddSampleDriver x64 Debug
         shell: pwsh
         run: |
