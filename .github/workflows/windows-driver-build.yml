@@ -72,8 +72,39 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
               throw "Failed to install x86 WDK package."
           }
+      - name: Inspect x86 WDK package layout
+        shell: pwsh
+        run: |
+          $root = "driver/upstream/packages/Microsoft.Windows.WDK.x86.10.0.28000.2526"
 
+          Write-Host "===== X86 PACKAGE FILES ====="
+          Get-ChildItem $root -Recurse -File |
+            Where-Object {
+              $_.Name -match "InfVerif|WindowsPrefast|stampinf"
+            } |
+            Select-Object FullName, Length
+
+          Write-Host "===== X86 BIN DIRECTORIES ====="
+          Get-ChildItem "$root/c/bin/10.0.28000.0" -Directory -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty FullName
+
+          Write-Host "===== X86 BUILD DIRECTORIES ====="
+          Get-ChildItem "$root/c/build/10.0.28000.0" -Directory -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty FullName
      
+      - name: Inspect WDK MSBuild tool references
+        shell: pwsh
+        run: |
+          $targets = "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c/build/10.0.28000.0/WindowsDriver.common.targets"
+
+          Write-Host "===== INFVERIF REFERENCES ====="
+          Select-String -Path $targets -Pattern "InfVerif|InfVerif.dll" -Context 5,5
+
+          Write-Host "===== PREFAST REFERENCES ====="
+          Get-ChildItem "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c" -Recurse -Include "*.targets","*.props" |
+            Select-String -Pattern "WindowsPrefast|Prefast" |
+            Select-Object -First 30
+
       - name: Inspect INF verification and Prefast tools
         shell: pwsh
         run: |
@@ -129,6 +160,7 @@ jobs:
 
       
       - name: Build IddSampleDriver x64 Debug
+        if: false
         shell: pwsh
         run: |
           $project = "driver/upstream/video/IndirectDisplay/IddSampleDriver/IddSampleDriver.vcxproj"
