@@ -97,10 +97,28 @@ jobs:
             } |
             Format-Table -AutoSize
 
+      
       - name: Build IddSampleDriver x64 Debug
         shell: pwsh
         run: |
           $project = "driver/upstream/video/IndirectDisplay/IddSampleDriver/IddSampleDriver.vcxproj"
+
+          $stampInfDir = Join-Path $env:GITHUB_WORKSPACE "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c/bin/10.0.28000.0/x64"
+
+          $stampInfExe = Join-Path $stampInfDir "stampinf.exe"
+
+          Write-Host "Checking StampInf:"
+          Write-Host $stampInfExe
+
+          if (-not (Test-Path $stampInfExe)) {
+              throw "stampinf.exe is missing from the expected x64 WDK package."
+          }
+
+          # Make StampInf discoverable by MSBuild.
+          $env:PATH = "$stampInfDir;$env:PATH"
+
+          Write-Host "StampInf version:"
+          & $stampInfExe -?
 
           $logger = "/flp:logfile=$env:GITHUB_WORKSPACE\driver-build.log;verbosity=normal"
 
@@ -109,6 +127,7 @@ jobs:
             /p:Configuration=Debug `
             /p:Platform=x64 `
             /p:SignMode=Off `
+            "/p:StampInfToolPath=$stampInfDir" `
             /verbosity:minimal `
             /fl `
             $logger
