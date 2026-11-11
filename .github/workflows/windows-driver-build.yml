@@ -75,10 +75,18 @@ jobs:
               throw "Failed to install x86 WDK package."
           }
 
+      
       - name: Build IddSampleDriver x64 Debug
         shell: pwsh
         run: |
           $project = "driver/upstream/video/IndirectDisplay/IddSampleDriver/IddSampleDriver.vcxproj"
+
+          $msbuildDefault = (Get-Command msbuild).Source
+          $msbuild64 = Join-Path (Split-Path $msbuildDefault) "amd64\MSBuild.exe"
+
+          if (!(Test-Path $msbuild64)) {
+              throw "64-bit MSBuild executable not found: $msbuild64"
+          }
 
           $stampInfDir = Join-Path $env:GITHUB_WORKSPACE "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c/bin/10.0.28000.0/x64"
 
@@ -88,14 +96,12 @@ jobs:
 
           $env:PATH = "$stampInfDir;$env:PATH"
 
-          Write-Host "===== BUILD CONFIGURATION ====="
-          Write-Host "Target architecture: x64"
-          Write-Host "Host tool architecture: x64"
-          Write-Host "StampInf directory: $stampInfDir"
+          Write-Host "===== MSBUILD EXECUTABLE ====="
+          Write-Host $msbuild64
 
           Write-Host "===== BUILD ====="
 
-          msbuild $project `
+          & $msbuild64 $project `
             -nologo `
             -m `
             -v:minimal `
