@@ -39,14 +39,17 @@ jobs:
       - name: Verify build environment
         shell: pwsh
         run: |
-          Write-Host "MSBuild:"
+          Write-Host "===== MSBUILD ====="
           msbuild -version
 
-          Write-Host "NuGet:"
-          nuget help | Select-Object -First 3
+          Write-Host "===== PROJECT ====="
+          $project = "driver/upstream/video/IndirectDisplay/IddSampleDriver/IddSampleDriver.vcxproj"
 
-          Write-Host "Sample project:"
-          Test-Path "driver/upstream/video/IndirectDisplay/IddSampleDriver/IddSampleDriver.vcxproj"
+          if (!(Test-Path $project)) {
+              throw "IDD sample project not found."
+          }
+
+          Write-Host "Project found."
 
       - name: Restore WDK and SDK NuGet packages
         shell: pwsh
@@ -60,8 +63,7 @@ jobs:
               throw "WDK NuGet restore failed."
           }
 
-      
-      - name: Install x86 WDK components
+      - name: Install x86 WDK host tools
         shell: pwsh
         run: |
           nuget install Microsoft.Windows.WDK.x86 `
@@ -73,259 +75,74 @@ jobs:
               throw "Failed to install x86 WDK package."
           }
 
-      - name: Inspect x86 WDK files and build targets
-        shell: pwsh
-        run: |
-          $root = "driver/upstream/packages/Microsoft.Windows.WDK.x86.10.0.28000.2526"
-          $targets = "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c/build/10.0.28000.0/WindowsDriver.common.targets"
-
-          Write-Host "===== X86 PACKAGE DLL FILES ====="
-          Get-ChildItem $root -Recurse -File -Filter "*.dll" |
-            Select-Object -ExpandProperty FullName
-
-          Write-Host "===== X86 PACKAGE EXE FILES ====="
-          Get-ChildItem $root -Recurse -File -Filter "*.exe" |
-            Select-Object -First 60 -ExpandProperty FullName
-
-          Write-Host "===== X86 PACKAGE BUILD BIN CONTENTS ====="
-          Get-ChildItem "$root/c/build/10.0.28000.0/bin" -Recurse -File -ErrorAction SilentlyContinue |
-            Select-Object -First 60 -ExpandProperty FullName
-
-          Write-Host "===== INFVERIF TARGET LOGIC ====="
-          Select-String -Path $targets -Pattern "InfVerif" -Context 8,8
-
-          Write-Host "===== PREFast TARGET REFERENCES ====="
-          Get-ChildItem "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c" -Recurse -Include "*.targets","*.props" |
-            Select-String -Pattern "WindowsPrefast|Prefast" |
-            Select-Object -First 30
-      - name: Inspect WDK architecture properties
-        shell: pwsh
-        run: |
-          $base = "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c/build"
-
-          Write-Host "===== COMMON TARGETS: INFVERIF ====="
-          $file = "$base/10.0.28000.0/WindowsDriver.common.targets"
-          $lines = Get-Content $file
-
-          for ($i = 660; $i -le 710; $i++) {
-              if ($i -lt $lines.Length) {
-                  "{0}: {1}" -f ($i + 1), $lines[$i]
-              }
-          }
-
-          Write-Host "===== WDK ROOT PROPERTY DEFINITIONS ====="
-          Get-ChildItem $base -Recurse -Include "*.props","*.targets" |
-            Select-String -Pattern "WDKBinRoot_x86|WDKBinRoot_x64|WDKContentRoot" |
-            Select-Object -First 60
-
-          Write-Host "===== PROJECT TOOL ARCHITECTURE ====="
-          Select-String `
-            -Path "driver/upstream/video/IndirectDisplay/IddSampleDriver/IddSampleDriver.vcxproj" `
-            -Pattern "PlatformToolset|WDK|VCToolArchitecture|CLToolArchitecture|DefaultToolArchitecture" `
-            -Context 1,2
-      - name: Trace WDK tool path definitions
-        shell: pwsh
-        run: |
-          $root = "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c"
-
-          Write-Host "===== INFVERIF TARGET REMAINDER ====="
-          $file = "$root/build/10.0.28000.0/WindowsDriver.common.targets"
-          $lines = Get-Content $file
-
-          for ($i = 680; $i -lt [Math]::Min(730, $lines.Length); $i++) {
-              "{0}: {1}" -f ($i + 1), $lines[$i]
-          }
-
-          Write-Host "===== ALL WDK ROOT PROPERTY DEFINITIONS ====="
-          Get-ChildItem $root -Recurse -Include "*.props","*.targets" |
-            Select-String -Pattern "WDKBinRoot|WDKContentRoot|InfVerifTool|InfVerifPath|PREfastAdditionalPlugins" |
-            Select-Object -First 150
-
-          Write-Host "===== X86 TOOL FILES ====="
-          Get-ChildItem "driver/upstream/packages/Microsoft.Windows.WDK.x86.10.0.28000.2526/c" -Recurse -File |
-            Where-Object {
-              $_.Name -match "InfVerif|WindowsPrefast|drivers\.dll"
-            } |
-            Select-Object -ExpandProperty FullName
-
-          Write-Host "===== X64 TOOL FILES ====="
-          Get-ChildItem $root -Recurse -File |
-            Where-Object {
-              $_.Name -match "InfVerif|WindowsPrefast|drivers\.dll"
-            } |
-            Select-Object -ExpandProperty FullName
-      - name: Inspect evaluated MSBuild properties
-        shell: pwsh
-        run: |
-          $project = "driver/upstream/video/IndirectDisplay/IddSampleDriver/IddSampleDriver.vcxproj"
-
-          Write-Host "===== MSBUILD VERSION ====="
-          msbuild -version
-
-          Write-Host "===== EVALUATED DRIVER PROPERTIES ====="
-          msbuild $project `
-            -nologo `
-            -p:Configuration=Debug `
-            -p:Platform=x64 `
-            -getProperty:Platform,Configuration,PlatformToolset,PreferredToolArchitecture,CLToolArchitecture,VCToolArchitecture,DefaultToolArchitecture,Processor_Architecture,WDKContentRoot,WDKBinRoot,WDKBinRoot_x86,WDKBinRoot_x64,WDKBuildFolder,TargetPlatformVersion,DriverTargetPlatform
-
-          if ($LASTEXITCODE -ne 0) {
-              throw "Failed to inspect evaluated MSBuild properties."
-          }
-
-          Write-Host "===== MSBUILD EXECUTABLE ====="
-          Get-Command msbuild | Select-Object Source
-
-          Write-Host "===== PREFast ARCHITECTURE CONDITIONS ====="
-          $targets = "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c/build/10.0.28000.0/WindowsDriver.Common.targets"
-
-          Select-String -Path $targets `
-            -Pattern "PREfastAdditionalPlugins|CLToolArchitecture|VCToolArchitecture|DefaultToolArchitecture" `
-            -Context 1,1
-            
-      - name: Inspect x86 WDK package layout
-        shell: pwsh
-        run: |
-          $root = "driver/upstream/packages/Microsoft.Windows.WDK.x86.10.0.28000.2526"
-
-          Write-Host "===== X86 PACKAGE FILES ====="
-          Get-ChildItem $root -Recurse -File |
-            Where-Object {
-              $_.Name -match "InfVerif|WindowsPrefast|stampinf"
-            } |
-            Select-Object FullName, Length
-
-          Write-Host "===== X86 BIN DIRECTORIES ====="
-          Get-ChildItem "$root/c/bin/10.0.28000.0" -Directory -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty FullName
-
-          Write-Host "===== X86 BUILD DIRECTORIES ====="
-          Get-ChildItem "$root/c/build/10.0.28000.0" -Directory -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty FullName
-     
-      - name: Inspect WDK MSBuild tool references
-        shell: pwsh
-        run: |
-          $targets = "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c/build/10.0.28000.0/WindowsDriver.common.targets"
-
-          Write-Host "===== INFVERIF REFERENCES ====="
-          Select-String -Path $targets -Pattern "InfVerif|InfVerif.dll" -Context 5,5
-
-          Write-Host "===== PREFAST REFERENCES ====="
-          Get-ChildItem "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c" -Recurse -Include "*.targets","*.props" |
-            Select-String -Pattern "WindowsPrefast|Prefast" |
-            Select-Object -First 30
-
-      - name: Inspect INF verification and Prefast tools
-        shell: pwsh
-        run: |
-          $packages = "driver/upstream/packages"
-
-          Write-Host "===== INFVERIF DLL ====="
-          Get-ChildItem $packages -Recurse -Filter InfVerif.dll |
-            Select-Object -ExpandProperty FullName
-
-          Write-Host "===== WINDOWS PREFAST DLL ====="
-          Get-ChildItem $packages -Recurse -Filter WindowsPrefast.dll |
-            Select-Object -ExpandProperty FullName
-
-          Write-Host "===== X86 WDK PACKAGE ====="
-          Get-ChildItem "$packages/Microsoft.Windows.WDK.x86*" -Directory |
-            Select-Object -ExpandProperty FullName
-
-      - name: Diagnose WDK tools
-        shell: pwsh
-        run: |
-          Write-Host "===== SEARCHING FOR STAMPINF ====="
-
-          $roots = @(
-            "$env:GITHUB_WORKSPACE\driver\upstream\packages",
-            "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
-            "$env:ProgramFiles\Windows Kits\10\bin"
-          )
-
-          foreach ($root in $roots) {
-            if (Test-Path $root) {
-              Write-Host "Searching: $root"
-
-              Get-ChildItem -Path $root `
-                -Filter stampinf.exe `
-                -Recurse `
-                -ErrorAction SilentlyContinue |
-                Select-Object -ExpandProperty FullName
-            }
-          }
-
-          Write-Host "===== NUGET PACKAGES ====="
-
-          Get-ChildItem "driver/upstream/packages" -Directory |
-            Select-Object -ExpandProperty Name
-
-          Write-Host "===== WDK ENVIRONMENT ====="
-
-          Get-ChildItem Env: |
-            Where-Object {
-              $_.Name -match "WDK|SDK|Windows"
-            } |
-            Format-Table -AutoSize
-
-      
       - name: Build IddSampleDriver x64 Debug
-        if: false
         shell: pwsh
         run: |
           $project = "driver/upstream/video/IndirectDisplay/IddSampleDriver/IddSampleDriver.vcxproj"
 
           $stampInfDir = Join-Path $env:GITHUB_WORKSPACE "driver/upstream/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526/c/bin/10.0.28000.0/x64"
 
-          $stampInfExe = Join-Path $stampInfDir "stampinf.exe"
-
-          Write-Host "Checking StampInf:"
-          Write-Host $stampInfExe
-
-          if (-not (Test-Path $stampInfExe)) {
-              throw "stampinf.exe is missing from the expected x64 WDK package."
+          if (!(Test-Path "$stampInfDir/stampinf.exe")) {
+              throw "x64 StampInf executable not found."
           }
 
-          # Make StampInf discoverable by MSBuild.
           $env:PATH = "$stampInfDir;$env:PATH"
 
-          Write-Host "StampInf version:"
-          & $stampInfExe -?
+          Write-Host "===== BUILD CONFIGURATION ====="
+          Write-Host "Target architecture: x64"
+          Write-Host "Host tool architecture: x64"
+          Write-Host "StampInf directory: $stampInfDir"
 
-          $logger = "/flp:logfile=$env:GITHUB_WORKSPACE\driver-build.log;verbosity=normal"
+          Write-Host "===== BUILD ====="
 
           msbuild $project `
-            /m `
-            /p:Configuration=Debug `
-            /p:Platform=x64 `
-            /p:SignMode=Off `
-            "/p:StampInfToolPath=$stampInfDir" `
-            /verbosity:minimal `
-            /fl `
-            $logger
+            -nologo `
+            -m `
+            -v:minimal `
+            -p:Configuration=Debug `
+            -p:Platform=x64 `
+            -p:PreferredToolArchitecture=x64 `
+            -p:StampInfToolPath="$stampInfDir" `
+            "/flp:LogFile=driver-build.log;Verbosity=normal"
 
           if ($LASTEXITCODE -ne 0) {
-              throw "IddSampleDriver compilation failed."
+              throw "IDD driver build failed."
           }
 
       - name: Verify build output
-        if: false
         shell: pwsh
         run: |
           $output = "driver/upstream/video/IndirectDisplay/IddSampleDriver/x64/Debug"
 
-          Write-Host "Build output:"
-          Get-ChildItem $output -Recurse -File |
-            Select-Object FullName, Length
+          Write-Host "===== BUILD OUTPUT ====="
 
-          $dll = Get-ChildItem $output -Recurse -Filter "IddSampleDriver.dll"
-
-          if (-not $dll) {
-              throw "IddSampleDriver.dll was not generated."
+          if (!(Test-Path $output)) {
+              throw "Driver output directory not found."
           }
 
-          Write-Host "Driver DLL generated successfully."
+          Get-ChildItem $output -File |
+            Select-Object Name, Length
+
+          $sys = Join-Path $output "IddSampleDriver.sys"
+          $inf = Join-Path $output "IddSampleDriver.inf"
+          $cat = Join-Path $output "IddSampleDriver.cat"
+
+          if (!(Test-Path $sys)) {
+              throw "Driver SYS file was not generated."
+          }
+
+          if (!(Test-Path $inf)) {
+              throw "Driver INF file was not generated."
+          }
+
+          Write-Host "Driver SYS and INF files generated successfully."
+
+          if (Test-Path $cat) {
+              Write-Host "Catalog file generated."
+          }
+          else {
+              Write-Host "Catalog file not generated; signing/package configuration may be required."
+          }
 
       - name: Upload driver build artifacts
         if: always()
