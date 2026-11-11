@@ -115,6 +115,7 @@ jobs:
               throw "IDD driver build failed."
           }
 
+      
       - name: Verify build output
         shell: pwsh
         run: |
@@ -129,26 +130,27 @@ jobs:
           Get-ChildItem $output -File |
             Select-Object Name, Length
 
-          $sys = Join-Path $output "IddSampleDriver.sys"
+          $dll = Join-Path $output "IddSampleDriver.dll"
           $inf = Join-Path $output "IddSampleDriver.inf"
           $cat = Join-Path $output "IddSampleDriver.cat"
 
-          if (!(Test-Path $sys)) {
-              throw "Driver SYS file was not generated."
+          if (!(Test-Path $dll)) {
+              throw "IddSampleDriver.dll was not generated."
           }
 
           if (!(Test-Path $inf)) {
-              throw "Driver INF file was not generated."
+              throw "IddSampleDriver.inf was not generated."
           }
 
-          Write-Host "Driver SYS and INF files generated successfully."
+          Write-Host "DLL and INF generated successfully."
 
           if (Test-Path $cat) {
               Write-Host "Catalog file generated."
           }
           else {
-              Write-Host "Catalog file not generated; signing/package configuration may be required."
+              Write-Host "Catalog file not generated."
           }
+
 
       - name: Upload driver build artifacts
         if: always()
