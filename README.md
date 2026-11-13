@@ -177,6 +177,7 @@ Streaming desktop. Press Ctrl+C to stop.
 Frames: 10 | JPEG size: XX KB
 
 
+cd f:\platform-tools\
 .\adb.exe kill-server
 .\adb.exe start-server
 .\adb.exe devices

@@ -24,7 +24,7 @@ class MicromaxDisplayApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Micromax USB Display")
-        self.root.geometry("480x720")
+        self.root.geometry("480x680")
         self.root.resizable(False, False)
 
         self.events = queue.Queue()
