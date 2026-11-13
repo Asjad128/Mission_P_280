@@ -11,6 +11,7 @@ import java.io.InputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -127,12 +128,18 @@ public final class UsbReceiver {
 
                 } catch (SocketException exception) {
                     if (running) {
-                        listener.onError("Receiver socket error", exception);
+                        listener.onError(
+                                "Receiver socket error",
+                                exception
+                        );
                     }
 
                 } catch (IOException exception) {
                     if (running) {
-                        listener.onError("Connection error", exception);
+                        listener.onError(
+                                "Connection error",
+                                exception
+                        );
                     }
 
                 } finally {
@@ -213,6 +220,13 @@ public final class UsbReceiver {
 
         long statsStart = System.nanoTime();
 
+        // Reuse decoder options rather than allocating them per frame.
+        BitmapFactory.Options options =
+                new BitmapFactory.Options();
+
+        options.inPreferredConfig = Bitmap.Config.RGB_565;
+        options.inDither = true;
+
         while (running) {
 
             byte[] jpeg;
@@ -240,16 +254,21 @@ public final class UsbReceiver {
             long decodeStart = System.nanoTime();
 
             Bitmap frame = BitmapFactory.decodeByteArray(
-                    jpeg, 0, jpeg.length
+                    jpeg,
+                    0,
+                    jpeg.length,
+                    options
             );
 
-            long decodeDuration = System.nanoTime() - decodeStart;
+            long decodeDuration =
+                    System.nanoTime() - decodeStart;
 
             decodeTimeNanos.addAndGet(decodeDuration);
 
             if (frame == null) {
                 listener.onError(
-                        "Received malformed JPEG frame", null
+                        "Received malformed JPEG frame",
+                        null
                 );
                 continue;
             }
@@ -263,7 +282,6 @@ public final class UsbReceiver {
 
             decodedFrames.incrementAndGet();
 
-            // Report performance every approximately 2 seconds.
             long now = System.nanoTime();
 
             if (now - statsStart >= 2_000_000_000L) {
@@ -290,16 +308,18 @@ public final class UsbReceiver {
 
                 Log.i(TAG,
                         String.format(
-                                java.util.Locale.US,
+                                Locale.US,
                                 "RX: %.1f FPS | Decode: %.1f FPS"
                                 + " | Avg decode: %.1f ms"
                                 + " | Replaced: %d"
-                                + " | Callback: %.2f ms",
+                                + " | Callback: %.2f ms"
+                                + " | Bitmap: %s",
                                 rxFps,
                                 decodeFps,
                                 avgDecodeMs,
                                 replaced,
-                                callbackMs
+                                callbackMs,
+                                frame.getConfig()
                         )
                 );
 
