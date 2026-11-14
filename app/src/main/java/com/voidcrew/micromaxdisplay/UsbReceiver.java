@@ -23,10 +23,6 @@ public final class UsbReceiver {
     private static final int MAX_FRAME_SIZE = 4 * 1024 * 1024;
     private static final int HEADER_SIZE = 4;
 
-    // Tablet landscape display dimensions.
-    private static final int DISPLAY_WIDTH = 800;
-    private static final int DISPLAY_HEIGHT = 480;
-
     public interface Listener {
         void onStatus(String status);
         void onFrame(Bitmap frame);
@@ -49,12 +45,20 @@ public final class UsbReceiver {
 
     private final AtomicInteger receivedFrames = new AtomicInteger();
     private final AtomicInteger decodedFrames = new AtomicInteger();
+    private final AtomicInteger displayedFrames = new AtomicInteger();
     private final AtomicInteger replacedFrames = new AtomicInteger();
-    private final AtomicInteger staleDecodedFrames = new AtomicInteger();
+    private final AtomicInteger staleFrames = new AtomicInteger();
     private final AtomicLong decodeTimeNanos = new AtomicLong();
+
+    private final BitmapFactory.Options decodeOptions =
+            new BitmapFactory.Options();
 
     public UsbReceiver(Listener listener) {
         this.listener = listener;
+
+        decodeOptions.inPreferredConfig = Bitmap.Config.RGB_565;
+        decodeOptions.inDither = true;
+        decodeOptions.inSampleSize = 1;
     }
 
     public synchronized void start() {
@@ -224,18 +228,6 @@ public final class UsbReceiver {
 
         long statsStart = System.nanoTime();
 
-        BitmapFactory.Options boundsOptions =
-                new BitmapFactory.Options();
-
-        boundsOptions.inJustDecodeBounds = true;
-
-        BitmapFactory.Options decodeOptions =
-                new BitmapFactory.Options();
-
-        decodeOptions.inPreferredConfig = Bitmap.Config.RGB_565;
-        decodeOptions.inDither = true;
-        decodeOptions.inSampleSize = 1;
-
         while (running) {
 
             byte[] jpeg;
@@ -260,25 +252,8 @@ public final class UsbReceiver {
                 latestJpeg = null;
             }
 
+            // Decode the JPEG only once.
             long decodeStart = System.nanoTime();
-
-            // Read JPEG dimensions before full decoding.
-            boundsOptions.outWidth = 0;
-            boundsOptions.outHeight = 0;
-
-            BitmapFactory.decodeByteArray(
-                    jpeg,
-                    0,
-                    jpeg.length,
-                    boundsOptions
-            );
-
-            int sampleSize = calculateSafeSampleSize(
-                    boundsOptions.outWidth,
-                    boundsOptions.outHeight
-            );
-
-            decodeOptions.inSampleSize = sampleSize;
 
             Bitmap frame = BitmapFactory.decodeByteArray(
                     jpeg,
@@ -291,6 +266,7 @@ public final class UsbReceiver {
                     System.nanoTime() - decodeStart;
 
             decodeTimeNanos.addAndGet(decodeDuration);
+            decodedFrames.incrementAndGet();
 
             if (frame == null) {
                 listener.onError(
@@ -300,7 +276,7 @@ public final class UsbReceiver {
                 continue;
             }
 
-            // Skip this decoded frame if a newer one arrived meanwhile.
+            // Do not display an outdated frame.
             boolean stale;
 
             synchronized (decodeLock) {
@@ -312,7 +288,7 @@ public final class UsbReceiver {
                     frame.recycle();
                 }
 
-                staleDecodedFrames.incrementAndGet();
+                staleFrames.incrementAndGet();
                 continue;
             }
 
@@ -323,7 +299,7 @@ public final class UsbReceiver {
             long callbackDuration =
                     System.nanoTime() - callbackStart;
 
-            decodedFrames.incrementAndGet();
+            displayedFrames.incrementAndGet();
 
             long now = System.nanoTime();
 
@@ -334,15 +310,16 @@ public final class UsbReceiver {
 
                 int rx = receivedFrames.getAndSet(0);
                 int decoded = decodedFrames.getAndSet(0);
+                int displayed = displayedFrames.getAndSet(0);
                 int replaced = replacedFrames.getAndSet(0);
-                int staleSkipped =
-                        staleDecodedFrames.getAndSet(0);
+                int staleSkipped = staleFrames.getAndSet(0);
 
                 long totalDecode =
                         decodeTimeNanos.getAndSet(0);
 
                 double rxFps = rx / seconds;
                 double decodeFps = decoded / seconds;
+                double displayFps = displayed / seconds;
 
                 double avgDecodeMs = decoded > 0
                         ? (totalDecode / 1_000_000.0) / decoded
@@ -354,19 +331,21 @@ public final class UsbReceiver {
                 Log.i(TAG,
                         String.format(
                                 Locale.US,
-                                "RX: %.1f FPS | Decode: %.1f FPS"
+                                "RX: %.1f FPS"
+                                + " | Decode: %.1f FPS"
+                                + " | Display: %.1f FPS"
                                 + " | Avg decode: %.1f ms"
                                 + " | Replaced: %d"
                                 + " | Stale skipped: %d"
-                                + " | Sample: 1/%d"
+                                + " | Sample: 1/1"
                                 + " | Callback: %.2f ms"
                                 + " | Bitmap: %s",
                                 rxFps,
                                 decodeFps,
+                                displayFps,
                                 avgDecodeMs,
                                 replaced,
                                 staleSkipped,
-                                sampleSize,
                                 callbackMs,
                                 frame.getConfig()
                         )
@@ -375,58 +354,6 @@ public final class UsbReceiver {
                 statsStart = now;
             }
         }
-    }
-
-    /**
-     * Select the largest power-of-two sample size that keeps
-     * the decoded image at or above its fitted display dimensions.
-     * This preserves the complete image without cropping or stretching.
-     */
-    private static int calculateSafeSampleSize(
-            int sourceWidth,
-            int sourceHeight
-    ) {
-
-        if (sourceWidth <= 0 || sourceHeight <= 0) {
-            return 1;
-        }
-
-        double fitScale = Math.min(
-                (double) DISPLAY_WIDTH / sourceWidth,
-                (double) DISPLAY_HEIGHT / sourceHeight
-        );
-
-        int requiredWidth = Math.max(
-                1,
-                (int) Math.ceil(sourceWidth * fitScale)
-        );
-
-        int requiredHeight = Math.max(
-                1,
-                (int) Math.ceil(sourceHeight * fitScale)
-        );
-
-        int sampleSize = 1;
-
-        while (sampleSize <= (1 << 29)) {
-
-            int nextSample = sampleSize * 2;
-
-            int decodedWidth =
-                    (sourceWidth + nextSample - 1) / nextSample;
-
-            int decodedHeight =
-                    (sourceHeight + nextSample - 1) / nextSample;
-
-            if (decodedWidth < requiredWidth
-                    || decodedHeight < requiredHeight) {
-                break;
-            }
-
-            sampleSize = nextSample;
-        }
-
-        return sampleSize;
     }
 
     private static boolean readFully(
