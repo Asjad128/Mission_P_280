@@ -19,6 +19,7 @@ public final class FrameRenderer extends View {
             2_000_000_000L;
 
     private final Paint paint;
+    private final RectF destination = new RectF();
 
     private Bitmap latestFrame;
 
@@ -26,11 +27,25 @@ public final class FrameRenderer extends View {
     private boolean firstDrawLogged = false;
     private boolean stopped = false;
 
-    // Rendering performance counters.
+    // Cached destination geometry.
+    private int cachedViewWidth = -1;
+    private int cachedViewHeight = -1;
+    private int cachedFrameWidth = -1;
+    private int cachedFrameHeight = -1;
+
+    // Rendering statistics.
     private long drawStatsStart = System.nanoTime();
+    private long previousDrawTime = 0;
+
     private int drawCount = 0;
+    private int receivedCount = 0;
+
     private long totalDrawNanos = 0;
     private long maxDrawNanos = 0;
+
+    private long totalDrawIntervalNanos = 0;
+    private long maxDrawIntervalNanos = 0;
+    private int intervalCount = 0;
 
     public FrameRenderer(Context context) {
         super(context);
@@ -48,12 +63,14 @@ public final class FrameRenderer extends View {
             return;
         }
 
+        // Frames are delivered through MainActivity's main-thread handler.
         if (latestFrame != null && latestFrame != frame
                 && !latestFrame.isRecycled()) {
             latestFrame.recycle();
         }
 
         latestFrame = frame;
+        receivedCount++;
 
         if (!firstFrameLogged) {
             Log.d(TAG, "First bitmap received: "
@@ -63,7 +80,68 @@ public final class FrameRenderer extends View {
             firstFrameLogged = true;
         }
 
+        updateDestination(frame);
         invalidate();
+    }
+
+    @Override
+    protected void onSizeChanged(
+            int width,
+            int height,
+            int oldWidth,
+            int oldHeight) {
+
+        super.onSizeChanged(width, height, oldWidth, oldHeight);
+
+        cachedViewWidth = -1;
+        cachedViewHeight = -1;
+
+        if (latestFrame != null && !latestFrame.isRecycled()) {
+            updateDestination(latestFrame);
+        }
+    }
+
+    private void updateDestination(Bitmap frame) {
+
+        int viewWidth = getWidth();
+        int viewHeight = getHeight();
+
+        if (viewWidth <= 0 || viewHeight <= 0) {
+            return;
+        }
+
+        int frameWidth = frame.getWidth();
+        int frameHeight = frame.getHeight();
+
+        if (viewWidth == cachedViewWidth
+                && viewHeight == cachedViewHeight
+                && frameWidth == cachedFrameWidth
+                && frameHeight == cachedFrameHeight) {
+            return;
+        }
+
+        float scale = Math.min(
+                (float) viewWidth / frameWidth,
+                (float) viewHeight / frameHeight
+        );
+
+        float width = frameWidth * scale;
+        float height = frameHeight * scale;
+
+        float left = (viewWidth - width) / 2.0f;
+        float top = (viewHeight - height) / 2.0f;
+
+        destination.set(
+                left,
+                top,
+                left + width,
+                top + height
+        );
+
+        cachedViewWidth = viewWidth;
+        cachedViewHeight = viewHeight;
+        cachedFrameWidth = frameWidth;
+        cachedFrameHeight = frameHeight;
     }
 
     @Override
@@ -72,8 +150,6 @@ public final class FrameRenderer extends View {
         long drawStart = System.nanoTime();
 
         super.onDraw(canvas);
-
-        canvas.drawColor(Color.BLACK);
 
         Bitmap frame = latestFrame;
 
@@ -88,28 +164,16 @@ public final class FrameRenderer extends View {
             firstDrawLogged = true;
         }
 
-        float scale = Math.min(
-                (float) canvas.getWidth() / frame.getWidth(),
-                (float) canvas.getHeight() / frame.getHeight()
+        canvas.drawBitmap(
+                frame,
+                null,
+                destination,
+                paint
         );
 
-        float width = frame.getWidth() * scale;
-        float height = frame.getHeight() * scale;
+        long drawEnd = System.nanoTime();
 
-        float left = (canvas.getWidth() - width) / 2.0f;
-        float top = (canvas.getHeight() - height) / 2.0f;
-
-        RectF destination = new RectF(
-                left,
-                top,
-                left + width,
-                top + height
-        );
-
-        canvas.drawBitmap(frame, null, destination, paint);
-
-        // Measure time spent executing the drawing operations.
-        long drawDuration = System.nanoTime() - drawStart;
+        long drawDuration = drawEnd - drawStart;
 
         drawCount++;
         totalDrawNanos += drawDuration;
@@ -117,6 +181,21 @@ public final class FrameRenderer extends View {
         if (drawDuration > maxDrawNanos) {
             maxDrawNanos = drawDuration;
         }
+
+        // Measure time between actual onDraw executions.
+        if (previousDrawTime != 0) {
+
+            long interval = drawStart - previousDrawTime;
+
+            totalDrawIntervalNanos += interval;
+            intervalCount++;
+
+            if (interval > maxDrawIntervalNanos) {
+                maxDrawIntervalNanos = interval;
+            }
+        }
+
+        previousDrawTime = drawStart;
 
         long now = System.nanoTime();
 
@@ -134,26 +213,48 @@ public final class FrameRenderer extends View {
             double maxDrawMs =
                     maxDrawNanos / 1_000_000.0;
 
+            double avgIntervalMs = intervalCount > 0
+                    ? (totalDrawIntervalNanos / 1_000_000.0)
+                    / intervalCount
+                    : 0.0;
+
+            double maxIntervalMs =
+                    maxDrawIntervalNanos / 1_000_000.0;
+
             Log.i(TAG,
                     String.format(
                             Locale.US,
                             "Render: %.1f FPS"
+                            + " | Frames received: %d"
                             + " | Avg draw: %.2f ms"
-                            + " | Max draw: %.2f ms",
+                            + " | Max draw: %.2f ms"
+                            + " | Avg draw interval: %.2f ms"
+                            + " | Max draw interval: %.2f ms",
                             drawFps,
+                            receivedCount,
                             avgDrawMs,
-                            maxDrawMs
+                            maxDrawMs,
+                            avgIntervalMs,
+                            maxIntervalMs
                     )
             );
 
             drawStatsStart = now;
+
             drawCount = 0;
+            receivedCount = 0;
+
             totalDrawNanos = 0;
             maxDrawNanos = 0;
+
+            totalDrawIntervalNanos = 0;
+            maxDrawIntervalNanos = 0;
+            intervalCount = 0;
         }
     }
 
     public void shutdown() {
+
         stopped = true;
 
         if (latestFrame != null && !latestFrame.isRecycled()) {
