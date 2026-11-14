@@ -21,12 +21,9 @@ PORT = 27183
 DEVICE_IDX = 0
 OUTPUT_IDX = 3
 
-WIDTH = 480
-HEIGHT = 270
-
 CAPTURE_FPS = 30
 SEND_FPS = 15
-JPEG_QUALITY = 25
+JPEG_QUALITY = 95
 
 SEND_BUFFER = 128 * 1024
 
@@ -53,7 +50,6 @@ stats = {
     "sent": 0,
     "capture_wait_ms": 0.0,
     "copy_ms": 0.0,
-    "resize_ms": 0.0,
     "jpeg_ms": 0.0,
     "send_ms": 0.0,
     "jpeg_bytes": 0,
@@ -236,25 +232,19 @@ def encode_worker():
         last_generation = generation
 
         try:
-            # Resize
-            resize_start = time.perf_counter()
+            # Preserve the complete captured desktop frame.
+            # No resizing, cropping, or aspect-ratio conversion.
+            if not getattr(encode_worker, "_resolution_logged", False):
+                height, width = frame.shape[:2]
+                print(f"Captured source resolution: {width}x{height}")
+                encode_worker._resolution_logged = True
 
-            resized = cv2.resize(
-                frame,
-                (WIDTH, HEIGHT),
-                interpolation=cv2.INTER_LINEAR
-            )
-
-            resize_ms = (
-                time.perf_counter() - resize_start
-            ) * 1000
-
-            # JPEG encoding
+            # High-quality JPEG encoding at the original capture dimensions.
             jpeg_start = time.perf_counter()
 
             success, encoded = cv2.imencode(
                 ".jpg",
-                resized,
+                frame,
                 [
                     cv2.IMWRITE_JPEG_QUALITY,
                     JPEG_QUALITY,
@@ -283,7 +273,6 @@ def encode_worker():
 
             with stats_lock:
                 stats["encoded"] += 1
-                stats["resize_ms"] += resize_ms
                 stats["jpeg_ms"] += jpeg_ms
                 stats["jpeg_bytes"] += len(data)
                 stats["dropped_raw"] += dropped
@@ -400,7 +389,6 @@ def report_stats():
             f"TX: {values['sent'] / elapsed:.1f} FPS | "
             f"Wait: {average(values['capture_wait_ms'], values['captured']):.1f} ms | "
             f"Copy: {average(values['copy_ms'], values['captured']):.1f} ms | "
-            f"Resize: {average(values['resize_ms'], values['encoded']):.1f} ms | "
             f"JPEG: {average(values['jpeg_ms'], values['encoded']):.1f} ms | "
             f"Send: {average(values['send_ms'], values['sent']):.1f} ms | "
             f"Size: {average(values['jpeg_bytes'], values['encoded']) / 1024:.1f} KB | "
@@ -441,7 +429,7 @@ def main():
         )
 
         print("Optimized DXcam + OpenCV pipeline initialized.")
-        print(f"Output: {WIDTH}x{HEIGHT}")
+        print("Output: original captured resolution (no resize)")
         print(f"Capture target: {CAPTURE_FPS} FPS")
         print(f"Transmission target: {SEND_FPS} FPS")
         print(f"JPEG quality: {JPEG_QUALITY}")

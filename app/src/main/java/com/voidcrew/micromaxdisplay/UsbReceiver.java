@@ -23,6 +23,10 @@ public final class UsbReceiver {
     private static final int MAX_FRAME_SIZE = 4 * 1024 * 1024;
     private static final int HEADER_SIZE = 4;
 
+    // Tablet landscape display dimensions.
+    private static final int DISPLAY_WIDTH = 800;
+    private static final int DISPLAY_HEIGHT = 480;
+
     public interface Listener {
         void onStatus(String status);
         void onFrame(Bitmap frame);
@@ -40,13 +44,13 @@ public final class UsbReceiver {
     private Thread receiverThread;
     private Thread decoderThread;
 
-    // Only the newest compressed frame is retained.
+    // One-slot queue: retain only the newest compressed frame.
     private byte[] latestJpeg;
 
-    // Performance counters.
     private final AtomicInteger receivedFrames = new AtomicInteger();
     private final AtomicInteger decodedFrames = new AtomicInteger();
     private final AtomicInteger replacedFrames = new AtomicInteger();
+    private final AtomicInteger staleDecodedFrames = new AtomicInteger();
     private final AtomicLong decodeTimeNanos = new AtomicLong();
 
     public UsbReceiver(Listener listener) {
@@ -220,12 +224,17 @@ public final class UsbReceiver {
 
         long statsStart = System.nanoTime();
 
-        // Reuse decoder options rather than allocating them per frame.
-        BitmapFactory.Options options =
+        BitmapFactory.Options boundsOptions =
                 new BitmapFactory.Options();
 
-        options.inPreferredConfig = Bitmap.Config.RGB_565;
-        options.inDither = true;
+        boundsOptions.inJustDecodeBounds = true;
+
+        BitmapFactory.Options decodeOptions =
+                new BitmapFactory.Options();
+
+        decodeOptions.inPreferredConfig = Bitmap.Config.RGB_565;
+        decodeOptions.inDither = true;
+        decodeOptions.inSampleSize = 1;
 
         while (running) {
 
@@ -253,11 +262,29 @@ public final class UsbReceiver {
 
             long decodeStart = System.nanoTime();
 
+            // Read JPEG dimensions before full decoding.
+            boundsOptions.outWidth = 0;
+            boundsOptions.outHeight = 0;
+
+            BitmapFactory.decodeByteArray(
+                    jpeg,
+                    0,
+                    jpeg.length,
+                    boundsOptions
+            );
+
+            int sampleSize = calculateSafeSampleSize(
+                    boundsOptions.outWidth,
+                    boundsOptions.outHeight
+            );
+
+            decodeOptions.inSampleSize = sampleSize;
+
             Bitmap frame = BitmapFactory.decodeByteArray(
                     jpeg,
                     0,
                     jpeg.length,
-                    options
+                    decodeOptions
             );
 
             long decodeDuration =
@@ -270,6 +297,22 @@ public final class UsbReceiver {
                         "Received malformed JPEG frame",
                         null
                 );
+                continue;
+            }
+
+            // Skip this decoded frame if a newer one arrived meanwhile.
+            boolean stale;
+
+            synchronized (decodeLock) {
+                stale = latestJpeg != null || !running;
+            }
+
+            if (stale) {
+                if (!frame.isRecycled()) {
+                    frame.recycle();
+                }
+
+                staleDecodedFrames.incrementAndGet();
                 continue;
             }
 
@@ -292,6 +335,8 @@ public final class UsbReceiver {
                 int rx = receivedFrames.getAndSet(0);
                 int decoded = decodedFrames.getAndSet(0);
                 int replaced = replacedFrames.getAndSet(0);
+                int staleSkipped =
+                        staleDecodedFrames.getAndSet(0);
 
                 long totalDecode =
                         decodeTimeNanos.getAndSet(0);
@@ -312,12 +357,16 @@ public final class UsbReceiver {
                                 "RX: %.1f FPS | Decode: %.1f FPS"
                                 + " | Avg decode: %.1f ms"
                                 + " | Replaced: %d"
+                                + " | Stale skipped: %d"
+                                + " | Sample: 1/%d"
                                 + " | Callback: %.2f ms"
                                 + " | Bitmap: %s",
                                 rxFps,
                                 decodeFps,
                                 avgDecodeMs,
                                 replaced,
+                                staleSkipped,
+                                sampleSize,
                                 callbackMs,
                                 frame.getConfig()
                         )
@@ -326,6 +375,58 @@ public final class UsbReceiver {
                 statsStart = now;
             }
         }
+    }
+
+    /**
+     * Select the largest power-of-two sample size that keeps
+     * the decoded image at or above its fitted display dimensions.
+     * This preserves the complete image without cropping or stretching.
+     */
+    private static int calculateSafeSampleSize(
+            int sourceWidth,
+            int sourceHeight
+    ) {
+
+        if (sourceWidth <= 0 || sourceHeight <= 0) {
+            return 1;
+        }
+
+        double fitScale = Math.min(
+                (double) DISPLAY_WIDTH / sourceWidth,
+                (double) DISPLAY_HEIGHT / sourceHeight
+        );
+
+        int requiredWidth = Math.max(
+                1,
+                (int) Math.ceil(sourceWidth * fitScale)
+        );
+
+        int requiredHeight = Math.max(
+                1,
+                (int) Math.ceil(sourceHeight * fitScale)
+        );
+
+        int sampleSize = 1;
+
+        while (sampleSize <= (1 << 29)) {
+
+            int nextSample = sampleSize * 2;
+
+            int decodedWidth =
+                    (sourceWidth + nextSample - 1) / nextSample;
+
+            int decodedHeight =
+                    (sourceHeight + nextSample - 1) / nextSample;
+
+            if (decodedWidth < requiredWidth
+                    || decodedHeight < requiredHeight) {
+                break;
+            }
+
+            sampleSize = nextSample;
+        }
+
+        return sampleSize;
     }
 
     private static boolean readFully(
