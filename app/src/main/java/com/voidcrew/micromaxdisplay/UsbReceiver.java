@@ -59,6 +59,7 @@ public final class UsbReceiver {
         decodeOptions.inPreferredConfig = Bitmap.Config.RGB_565;
         decodeOptions.inDither = true;
         decodeOptions.inSampleSize = 1;
+        decodeOptions.inTempStorage = new byte[16 * 1024];
     }
 
     public synchronized void start() {
