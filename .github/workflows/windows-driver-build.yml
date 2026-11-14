@@ -163,22 +163,18 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       
-      - name: Inspect IDD source files
+      - name: Extract driver mode implementation
         shell: pwsh
         run: |
-          $dir = "driver/upstream/video/IndirectDisplay/IddSampleDriver"
+          $file = "driver/upstream/video/IndirectDisplay/IddSampleDriver/Driver.cpp"
+          $lines = Get-Content $file
 
-          Write-Host "===== SOURCE FILES ====="
-          Get-ChildItem $dir -Recurse -File |
-            Where-Object {
-              $_.Extension -in ".cpp", ".h", ".hpp"
-            } |
-            Select-Object -ExpandProperty FullName
+          Write-Host "===== DRIVER INITIALIZATION (1-150) ====="
+          for ($i = 0; $i -lt [Math]::Min(150, $lines.Length); $i++) {
+              "{0,4}: {1}" -f ($i + 1), $lines[$i]
+          }
 
-          Write-Host "===== MODE ENUMERATION ====="
-          Get-ChildItem $dir -Recurse -File |
-            Where-Object {
-              $_.Extension -in ".cpp", ".h"
-            } |
-            Select-String -Pattern "QueryModes|DefaultModes|ParseMonitorDescription|CreateIddCxTargetMode|CommitModes" |
-            Select-Object Path, LineNumber, Line
+          Write-Host "===== MONITOR MODE IMPLEMENTATION (640-810) ====="
+          for ($i = 639; $i -lt [Math]::Min(810, $lines.Length); $i++) {
+              "{0,4}: {1}" -f ($i + 1), $lines[$i]
+          }
