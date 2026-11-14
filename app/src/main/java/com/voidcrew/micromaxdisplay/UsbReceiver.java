@@ -276,20 +276,13 @@ public final class UsbReceiver {
                 continue;
             }
 
-            // Do not display an outdated frame.
-            boolean stale;
-
-            synchronized (decodeLock) {
-                stale = latestJpeg != null || !running;
-            }
-
-            if (stale) {
+            // Deliver every successfully decoded frame.
+            // The one-slot queue already replaces older pending JPEGs.
+            if (!running) {
                 if (!frame.isRecycled()) {
                     frame.recycle();
                 }
-
-                staleFrames.incrementAndGet();
-                continue;
+                return;
             }
 
             long callbackStart = System.nanoTime();
