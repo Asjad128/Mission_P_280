@@ -35,27 +35,34 @@ jobs:
 
 
 
-      - name: Apply P280 overlay (one virtual monitor, 1280x768 + 480x800 + 800x480)
+      - name: Apply P280 overlay (one virtual monitor, 1280x768 + 768x1280 + 480x800 + 800x480)
         shell: pwsh
         run: |
-          $base    = "driver/upstream/video/IndirectDisplay/IddSampleDriver"
-          $source  = Join-Path $base "Driver.cpp"
-          $overlay = "driver/overlay/Driver.cpp"
-          $inf     = Join-Path $base "IddSampleDriver.inf"
+          $base = "driver/upstream/video/IndirectDisplay/IddSampleDriver"
+          $inf  = Join-Path $base "IddSampleDriver.inf"
 
-          if (!(Test-Path $source))  { throw "Upstream Driver.cpp not found." }
-          if (!(Test-Path $overlay)) { throw "Overlay driver/overlay/Driver.cpp not found in repository." }
-
-          # The overlay is a full copy of the pinned upstream file with our edits.
+          # Each overlay file is a full copy of the pinned upstream file with our edits.
           # Refuse to apply it if the upstream file is not exactly what the overlay was made from.
-          $text  = (Get-Content $source -Raw) -replace "`r`n", "`n"
-          $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
-          $hash  = ([System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::HashData($bytes)) -replace "-", "").ToLower()
-          $expected = "b6e9320291372a3f041e0bea716e15e7bc3d8df6359169e822d3eb3a281bdf3f"
-          if ($hash -ne $expected) { throw "Upstream Driver.cpp hash mismatch: $hash (expected $expected). Overlay not applied." }
+          $files = @(
+              @{ Name = "Driver.cpp"; Hash = "b6e9320291372a3f041e0bea716e15e7bc3d8df6359169e822d3eb3a281bdf3f" },
+              @{ Name = "Driver.h";   Hash = "1e9a431342cb57e3cc14e9d9f671c4def164eeaaa0b99dc33f00de1e37487c0c" }
+          )
 
-          Copy-Item $overlay $source -Force
-          Write-Host "Overlay Driver.cpp applied."
+          foreach ($f in $files) {
+              $source  = Join-Path $base $f.Name
+              $overlay = Join-Path "driver/overlay" $f.Name
+
+              if (!(Test-Path $source))  { throw "Upstream $($f.Name) not found." }
+              if (!(Test-Path $overlay)) { throw "Overlay driver/overlay/$($f.Name) not found in repository." }
+
+              $text  = (Get-Content $source -Raw) -replace "`r`n", "`n"
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
+              $hash  = ([System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::HashData($bytes)) -replace "-", "").ToLower()
+              if ($hash -ne $f.Hash) { throw "Upstream $($f.Name) hash mismatch: $hash (expected $($f.Hash)). Overlay not applied." }
+
+              Copy-Item $overlay $source -Force
+              Write-Host "Overlay $($f.Name) applied."
+          }
 
           # Cosmetic INF strings only. Hardware IDs stay unchanged (Root\IddSampleDriver).
           $t = Get-Content $inf -Raw
@@ -72,7 +79,8 @@ jobs:
           Set-Content -Path $inf -Value $t -NoNewline -Encoding ascii
           Write-Host "INF strings updated."
 
-          Select-String -Path $source -Pattern "IDD_SAMPLE_MONITOR_COUNT = ", "P280" | ForEach-Object { $_.Line.Trim() }
+          Select-String -Path (Join-Path $base "Driver.cpp") -Pattern "IDD_SAMPLE_MONITOR_COUNT = ", "768, 1280" | ForEach-Object { $_.Line.Trim() }
+          Select-String -Path (Join-Path $base "Driver.h") -Pattern "szModeList" | ForEach-Object { $_.Line.Trim() }
 
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2

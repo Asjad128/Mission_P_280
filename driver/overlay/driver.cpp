@@ -32,12 +32,14 @@ static const struct IndirectSampleMonitor::SampleMonitorMode s_SampleDefaultMode
     { 1280,  768, 60 },
     {  480,  800, 60 },
     {  800,  480, 60 },
+    {  768, 1280, 60 },
 };
 
 // P280: static info about the single virtual monitor reported to the OS.
 // EDID: manufacturer MMX, product 0x0280, name "P280 Display", EDID 1.4, 34x20 cm (about 96 DPI at 1280 wide),
 // preferred timing 1280x768@60. Generated with a valid checksum (all 128 bytes sum to 0 mod 256).
-// Modes: landscape 1280x768 (preferred, 5:3 like the tablet), native portrait 480x800, native landscape 800x480.
+// Modes: landscape 1280x768 (preferred, 5:3 like the tablet), native portrait 480x800, native landscape 800x480,
+// and portrait 768x1280 as a fallback in case Windows hides modes narrower than 800 pixels.
 static const struct IndirectSampleMonitor s_SampleMonitors[] =
 {
     {
@@ -55,6 +57,7 @@ static const struct IndirectSampleMonitor s_SampleMonitors[] =
             { 1280,  768, 60 },
             {  480,  800, 60 },
             {  800,  480, 60 },
+            {  768, 1280, 60 },
         },
         0
     }
@@ -757,6 +760,7 @@ NTSTATUS IddSampleMonitorQueryModes(IDDCX_MONITOR MonitorObject, const IDARG_IN_
     TargetModes.push_back(CreateIddCxTargetMode(1280,  768, 60));
     TargetModes.push_back(CreateIddCxTargetMode( 480,  800, 60));
     TargetModes.push_back(CreateIddCxTargetMode( 800,  480, 60));
+    TargetModes.push_back(CreateIddCxTargetMode( 768, 1280, 60));
 
     pOutArgs->TargetModeBufferOutputCount = (UINT) TargetModes.size();
 
