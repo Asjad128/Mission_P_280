@@ -35,82 +35,44 @@ jobs:
 
 
 
-      - name: Add 480x800 portrait mode
+      - name: Apply P280 overlay (one virtual monitor, 1280x768 + 480x800 + 800x480)
         shell: pwsh
         run: |
-          $base = "driver/upstream/video/IndirectDisplay/IddSampleDriver"
-          $header = Join-Path $base "Driver.h"
-          $source = Join-Path $base "Driver.cpp"
+          $base    = "driver/upstream/video/IndirectDisplay/IddSampleDriver"
+          $source  = Join-Path $base "Driver.cpp"
+          $overlay = "driver/overlay/Driver.cpp"
+          $inf     = Join-Path $base "IddSampleDriver.inf"
 
-          if (!(Test-Path $header) -or !(Test-Path $source)) {
-              throw "Driver source files not found."
+          if (!(Test-Path $source))  { throw "Upstream Driver.cpp not found." }
+          if (!(Test-Path $overlay)) { throw "Overlay driver/overlay/Driver.cpp not found in repository." }
+
+          # The overlay is a full copy of the pinned upstream file with our edits.
+          # Refuse to apply it if the upstream file is not exactly what the overlay was made from.
+          $text  = (Get-Content $source -Raw) -replace "`r`n", "`n"
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
+          $hash  = ([System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::HashData($bytes)) -replace "-", "").ToLower()
+          $expected = "b6e9320291372a3f041e0bea716e15e7bc3d8df6359169e822d3eb3a281bdf3f"
+          if ($hash -ne $expected) { throw "Upstream Driver.cpp hash mismatch: $hash (expected $expected). Overlay not applied." }
+
+          Copy-Item $overlay $source -Force
+          Write-Host "Overlay Driver.cpp applied."
+
+          # Cosmetic INF strings only. Hardware IDs stay unchanged (Root\IddSampleDriver).
+          $t = Get-Content $inf -Raw
+          $pairs = @(
+              @('"<Your manufacturer name>"', '"VoidCrew"'),
+              @('"IddSampleDriver Installation Disk"', '"P280 Display Driver Disk"'),
+              @('"IddSampleDriver Device"', '"P280 Virtual Display"')
+          )
+          foreach ($p in $pairs) {
+              $n = ([regex]::Matches($t, [regex]::Escape($p[0]))).Count
+              if ($n -ne 1) { throw "INF PATCH FAILED: '$($p[0])' expected 1 match, found $n." }
+              $t = $t.Replace($p[0], $p[1])
           }
+          Set-Content -Path $inf -Value $t -NoNewline -Encoding ascii
+          Write-Host "INF strings updated."
 
-          $h = Get-Content $header -Raw
-          $cpp = Get-Content $source -Raw
-
-          function Replace-RegexOnce {
-              param(
-                  [string]$Content,
-                  [string]$Pattern,
-                  [string]$Replacement,
-                  [string]$Label
-              )
-
-              $matches = [regex]::Matches($Content, $Pattern)
-
-              if ($matches.Count -ne 1) {
-                  throw "PATCH FAILED: $Label - expected 1 match, found $($matches.Count)."
-              }
-
-              return [regex]::Replace($Content, $Pattern, $Replacement, 1)
-          }
-
-          # 1. Expand the EDID monitor mode array from 3 to 4.
-          $h = Replace-RegexOnce $h `
-              'static constexpr size_t szModeList\s*=\s*3;' `
-              'static constexpr size_t szModeList = 4;' `
-              'EDID mode array size'
-
-          # 2. First EDID monitor:
-          # 2560x1440, 1920x1080, 1024x768.
-          $cpp = Replace-RegexOnce $cpp `
-              '(\{\s*2560\s*,\s*1440\s*,\s*144\s*\}\s*,\s*\{\s*1920\s*,\s*1080\s*,\s*60\s*\}\s*,\s*\{\s*1024\s*,\s*768\s*,\s*60\s*\}\s*,)' `
-              ('$1' + "`n            {  480,  800,  60 },") `
-              'first EDID monitor modes'
-
-          # 3. Second EDID monitor:
-          # 3840x2160, 1600x900, 1024x768.
-          $cpp = Replace-RegexOnce $cpp `
-              '(\{\s*3840\s*,\s*2160\s*,\s*60\s*\}\s*,\s*\{\s*1600\s*,\s*900\s*,\s*60\s*\}\s*,\s*\{\s*1024\s*,\s*768\s*,\s*60\s*\}\s*,)' `
-              ('$1' + "`n            {  480,  800,  60 },") `
-              'second EDID monitor modes'
-
-          # 4. Add portrait mode to EDID-less monitor defaults.
-          $cpp = Replace-RegexOnce $cpp `
-              '(\{\s*1024\s*,\s*768\s*,\s*75\s*\}\s*,)' `
-              ('$1' + "`n    {  480,  800,  60 },") `
-              'EDID-less default modes'
-
-          # 5. Add portrait mode to supported target modes.
-          $cpp = Replace-RegexOnce $cpp `
-              'TargetModes\.push_back\(CreateIddCxTargetMode\(1024,\s*768,\s*60\)\);' `
-              ('$0' + "`n    TargetModes.push_back(CreateIddCxTargetMode(480, 800, 60));") `
-              'target modes'
-
-          # Verify all expected changes before writing files.
-          if ($h -notmatch 'szModeList\s*=\s*4') {
-              throw "Verification failed: mode array size."
-          }
-
-          if (([regex]::Matches($cpp, '480,\s*800,\s*60')).Count -ne 4) {
-              throw "Verification failed: expected four portrait mode entries."
-          }
-
-          Set-Content -Path $header -Value $h -NoNewline
-          Set-Content -Path $source -Value $cpp -NoNewline
-
-          Write-Host "SUCCESS: 480x800 at 60Hz added to both EDID monitors, default modes, and target modes."
+          Select-String -Path $source -Pattern "IDD_SAMPLE_MONITOR_COUNT = ", "P280" | ForEach-Object { $_.Line.Trim() }
 
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -241,34 +203,3 @@ jobs:
             driver-build.log
           if-no-files-found: warn
           retention-days: 14
-      
-      - name: Extract driver mode implementation
-        shell: pwsh
-        run: |
-          $file = "driver/upstream/video/IndirectDisplay/IddSampleDriver/Driver.cpp"
-          $lines = Get-Content $file
-
-          Write-Host "===== DRIVER INITIALIZATION (1-150) ====="
-          for ($i = 0; $i -lt [Math]::Min(150, $lines.Length); $i++) {
-              "{0,4}: {1}" -f ($i + 1), $lines[$i]
-          }
-
-          Write-Host "===== MONITOR MODE IMPLEMENTATION (640-810) ====="
-      - name: Inspect monitor mode structures
-        shell: pwsh
-        run: |
-          $base = "driver/upstream/video/IndirectDisplay/IddSampleDriver"
-
-          Write-Host "===== Driver.h ====="
-          Get-Content "$base/Driver.h"
-
-          Write-Host "===== Monitor initialization ====="
-          $file = "$base/Driver.cpp"
-          $lines = Get-Content $file
-
-          for ($i = 250; $i -lt [Math]::Min(450, $lines.Length); $i++) {
-              "{0,4}: {1}" -f ($i + 1), $lines[$i]
-          }
-          for ($i = 639; $i -lt [Math]::Min(810, $lines.Length); $i++) {
-              "{0,4}: {1}" -f ($i + 1), $lines[$i]
-          }
