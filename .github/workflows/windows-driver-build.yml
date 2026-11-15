@@ -175,6 +175,21 @@ jobs:
           }
 
           Write-Host "===== MONITOR MODE IMPLEMENTATION (640-810) ====="
+      - name: Inspect monitor mode structures
+        shell: pwsh
+        run: |
+          $base = "driver/upstream/video/IndirectDisplay/IddSampleDriver"
+
+          Write-Host "===== Driver.h ====="
+          Get-Content "$base/Driver.h"
+
+          Write-Host "===== Monitor initialization ====="
+          $file = "$base/Driver.cpp"
+          $lines = Get-Content $file
+
+          for ($i = 250; $i -lt [Math]::Min(450, $lines.Length); $i++) {
+              "{0,4}: {1}" -f ($i + 1), $lines[$i]
+          }
           for ($i = 639; $i -lt [Math]::Min(810, $lines.Length); $i++) {
               "{0,4}: {1}" -f ($i + 1), $lines[$i]
           }
