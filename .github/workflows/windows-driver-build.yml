@@ -33,6 +33,59 @@ jobs:
             Directory.Build.props
           sparse-checkout-cone-mode: false
 
+      - name: Add 480x800 portrait mode
+        shell: pwsh
+        run: |
+          $base = "driver/upstream/video/IndirectDisplay/IddSampleDriver"
+          $header = Join-Path $base "Driver.h"
+          $source = Join-Path $base "Driver.cpp"
+
+          function Replace-Once($content, $old, $new, $label) {
+              if (-not $content.Contains($old)) {
+                  throw "PATCH FAILED: Could not find $label"
+              }
+              return $content.Replace($old, $new)
+          }
+
+          # Read and normalize line endings
+          $h = (Get-Content $header -Raw) -replace "`r`n", "`n"
+          $cpp = (Get-Content $source -Raw) -replace "`r`n", "`n"
+
+          # 1. Expand EDID-backed monitor mode arrays
+          $h = Replace-Once $h `
+              'static constexpr size_t szModeList = 3;' `
+              'static constexpr size_t szModeList = 4;' `
+              'monitor mode array size'
+
+          # 2. Add portrait mode to the first EDID-backed monitor
+          $cpp = Replace-Once $cpp `
+              "            { 1024,  768,  60 },`n        },`n        0" `
+              "            { 1024,  768,  60 },`n            {  480,  800,  60 },`n        },`n        0" `
+              "first EDID monitor"
+
+          # 3. Add portrait mode to the second EDID-backed monitor
+          $cpp = Replace-Once $cpp `
+              "            { 1024,  768,  60 },`n        },`n        0" `
+              "            { 1024,  768,  60 },`n            {  480,  800,  60 },`n        },`n        0" `
+              "second EDID monitor"
+
+          # 4. Add portrait mode to EDID-less monitor defaults
+          $cpp = Replace-Once $cpp `
+              "    { 1024,  768, 75 },`n};" `
+              "    { 1024,  768, 75 },`n    {  480,  800, 60 },`n};" `
+              "EDID-less default modes"
+
+          # 5. Add portrait mode to supported target modes
+          $cpp = Replace-Once $cpp `
+              "    TargetModes.push_back(CreateIddCxTargetMode(1024,  768, 60));" `
+              "    TargetModes.push_back(CreateIddCxTargetMode(1024,  768, 60));`n    TargetModes.push_back(CreateIddCxTargetMode( 480,  800, 60));" `
+              "target modes"
+
+          Set-Content $header $h -NoNewline
+          Set-Content $source $cpp -NoNewline
+
+          Write-Host "Portrait mode patch applied successfully."
+
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
 
