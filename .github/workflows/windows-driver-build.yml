@@ -34,6 +34,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
 
+
       - name: Add 480x800 portrait mode
         shell: pwsh
         run: |
@@ -41,52 +42,75 @@ jobs:
           $header = Join-Path $base "Driver.h"
           $source = Join-Path $base "Driver.cpp"
 
-          $h = (Get-Content $header -Raw) -replace "`r`n", "`n"
-          $cpp = (Get-Content $source -Raw) -replace "`r`n", "`n"
-
-          function Replace-Once($content, $old, $new, $label) {
-              $count = ([regex]::Matches($content, [regex]::Escape($old))).Count
-              if ($count -ne 1) {
-                  throw "PATCH FAILED: $label expected once, found $count"
-              }
-              return $content.Replace($old, $new)
+          if (!(Test-Path $header) -or !(Test-Path $source)) {
+              throw "Driver source files not found."
           }
 
-          # Expand each EDID monitor's mode array
-          $h = Replace-Once $h `
-              'static constexpr size_t szModeList = 3;' `
+          $h = Get-Content $header -Raw
+          $cpp = Get-Content $source -Raw
+
+          function Replace-RegexOnce {
+              param(
+                  [string]$Content,
+                  [string]$Pattern,
+                  [string]$Replacement,
+                  [string]$Label
+              )
+
+              $matches = [regex]::Matches($Content, $Pattern)
+
+              if ($matches.Count -ne 1) {
+                  throw "PATCH FAILED: $Label - expected 1 match, found $($matches.Count)."
+              }
+
+              return [regex]::Replace($Content, $Pattern, $Replacement, 1)
+          }
+
+          # 1. Expand the EDID monitor mode array from 3 to 4.
+          $h = Replace-RegexOnce $h `
+              'static constexpr size_t szModeList\s*=\s*3;' `
               'static constexpr size_t szModeList = 4;' `
-              'mode array size'
+              'EDID mode array size'
 
-          # First EDID monitor: 1024x768 is its final existing mode
-          $cpp = Replace-Once $cpp `
-              "            { 1024,  768,  60 },`n        },`n        0" `
-              "            { 1024,  768,  60 },`n            {  480,  800,  60 },`n        },`n        0" `
-              'first EDID monitor'
+          # 2. First EDID monitor:
+          # 2560x1440, 1920x1080, 1024x768.
+          $cpp = Replace-RegexOnce $cpp `
+              '(\{\s*2560\s*,\s*1440\s*,\s*144\s*\}\s*,\s*\{\s*1920\s*,\s*1080\s*,\s*60\s*\}\s*,\s*\{\s*1024\s*,\s*768\s*,\s*60\s*\}\s*,)' `
+              ('$1' + "`n            {  480,  800,  60 },") `
+              'first EDID monitor modes'
 
-          # Second EDID monitor: 1024x768 is also its final existing mode.
-          # Match the second monitor using its preceding 1600x900 entry.
-          $cpp = Replace-Once $cpp `
-              "            { 1600,  900,  60 },`n            { 1024,  768,  60 },`n        },`n        0" `
-              "            { 1600,  900,  60 },`n            { 1024,  768,  60 },`n            {  480,  800,  60 },`n        },`n        0" `
-              'second EDID monitor'
+          # 3. Second EDID monitor:
+          # 3840x2160, 1600x900, 1024x768.
+          $cpp = Replace-RegexOnce $cpp `
+              '(\{\s*3840\s*,\s*2160\s*,\s*60\s*\}\s*,\s*\{\s*1600\s*,\s*900\s*,\s*60\s*\}\s*,\s*\{\s*1024\s*,\s*768\s*,\s*60\s*\}\s*,)' `
+              ('$1' + "`n            {  480,  800,  60 },") `
+              'second EDID monitor modes'
 
-          # EDID-less monitor defaults
-          $cpp = Replace-Once $cpp `
-              "    { 1024,  768, 75 },`n};" `
-              "    { 1024,  768, 75 },`n    {  480,  800, 60 },`n};" `
+          # 4. Add portrait mode to EDID-less monitor defaults.
+          $cpp = Replace-RegexOnce $cpp `
+              '(\{\s*1024\s*,\s*768\s*,\s*75\s*\}\s*,)' `
+              ('$1' + "`n    {  480,  800,  60 },") `
               'EDID-less default modes'
 
-          # Target modes
-          $cpp = Replace-Once $cpp `
-              "    TargetModes.push_back(CreateIddCxTargetMode(1024,  768, 60));" `
-              "    TargetModes.push_back(CreateIddCxTargetMode(1024,  768, 60));`n    TargetModes.push_back(CreateIddCxTargetMode( 480,  800, 60));" `
+          # 5. Add portrait mode to supported target modes.
+          $cpp = Replace-RegexOnce $cpp `
+              'TargetModes\.push_back\(CreateIddCxTargetMode\(1024,\s*768,\s*60\)\);' `
+              ('$0' + "`n    TargetModes.push_back(CreateIddCxTargetMode(480, 800, 60));") `
               'target modes'
 
-          Set-Content $header $h -NoNewline
-          Set-Content $source $cpp -NoNewline
+          # Verify all expected changes before writing files.
+          if ($h -notmatch 'szModeList\s*=\s*4') {
+              throw "Verification failed: mode array size."
+          }
 
-          Write-Host "SUCCESS: 480x800 portrait mode added to all mode paths."
+          if (([regex]::Matches($cpp, '480,\s*800,\s*60')).Count -ne 4) {
+              throw "Verification failed: expected four portrait mode entries."
+          }
+
+          Set-Content -Path $header -Value $h -NoNewline
+          Set-Content -Path $source -Value $cpp -NoNewline
+
+          Write-Host "SUCCESS: 480x800 at 60Hz added to both EDID monitors, default modes, and target modes."
 
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
