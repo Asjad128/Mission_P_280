@@ -33,6 +33,7 @@ jobs:
             Directory.Build.props
           sparse-checkout-cone-mode: false
 
+
       - name: Add 480x800 portrait mode
         shell: pwsh
         run: |
@@ -40,51 +41,52 @@ jobs:
           $header = Join-Path $base "Driver.h"
           $source = Join-Path $base "Driver.cpp"
 
+          $h = (Get-Content $header -Raw) -replace "`r`n", "`n"
+          $cpp = (Get-Content $source -Raw) -replace "`r`n", "`n"
+
           function Replace-Once($content, $old, $new, $label) {
-              if (-not $content.Contains($old)) {
-                  throw "PATCH FAILED: Could not find $label"
+              $count = ([regex]::Matches($content, [regex]::Escape($old))).Count
+              if ($count -ne 1) {
+                  throw "PATCH FAILED: $label expected once, found $count"
               }
               return $content.Replace($old, $new)
           }
 
-          # Read and normalize line endings
-          $h = (Get-Content $header -Raw) -replace "`r`n", "`n"
-          $cpp = (Get-Content $source -Raw) -replace "`r`n", "`n"
-
-          # 1. Expand EDID-backed monitor mode arrays
+          # Expand each EDID monitor's mode array
           $h = Replace-Once $h `
               'static constexpr size_t szModeList = 3;' `
               'static constexpr size_t szModeList = 4;' `
-              'monitor mode array size'
+              'mode array size'
 
-          # 2. Add portrait mode to the first EDID-backed monitor
+          # First EDID monitor: 1024x768 is its final existing mode
           $cpp = Replace-Once $cpp `
               "            { 1024,  768,  60 },`n        },`n        0" `
               "            { 1024,  768,  60 },`n            {  480,  800,  60 },`n        },`n        0" `
-              "first EDID monitor"
+              'first EDID monitor'
 
-          # 3. Add portrait mode to the second EDID-backed monitor
+          # Second EDID monitor: 1024x768 is also its final existing mode.
+          # Match the second monitor using its preceding 1600x900 entry.
           $cpp = Replace-Once $cpp `
-              "            { 1024,  768,  60 },`n        },`n        0" `
-              "            { 1024,  768,  60 },`n            {  480,  800,  60 },`n        },`n        0" `
-              "second EDID monitor"
+              "            { 1600,  900,  60 },`n            { 1024,  768,  60 },`n        },`n        0" `
+              "            { 1600,  900,  60 },`n            { 1024,  768,  60 },`n            {  480,  800,  60 },`n        },`n        0" `
+              'second EDID monitor'
 
-          # 4. Add portrait mode to EDID-less monitor defaults
+          # EDID-less monitor defaults
           $cpp = Replace-Once $cpp `
               "    { 1024,  768, 75 },`n};" `
               "    { 1024,  768, 75 },`n    {  480,  800, 60 },`n};" `
-              "EDID-less default modes"
+              'EDID-less default modes'
 
-          # 5. Add portrait mode to supported target modes
+          # Target modes
           $cpp = Replace-Once $cpp `
               "    TargetModes.push_back(CreateIddCxTargetMode(1024,  768, 60));" `
               "    TargetModes.push_back(CreateIddCxTargetMode(1024,  768, 60));`n    TargetModes.push_back(CreateIddCxTargetMode( 480,  800, 60));" `
-              "target modes"
+              'target modes'
 
           Set-Content $header $h -NoNewline
           Set-Content $source $cpp -NoNewline
 
-          Write-Host "Portrait mode patch applied successfully."
+          Write-Host "SUCCESS: 480x800 portrait mode added to all mode paths."
 
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
