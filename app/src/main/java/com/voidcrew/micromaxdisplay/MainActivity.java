@@ -60,9 +60,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
             }
 
             if (destroyed || renderer == null) {
-                if (!frame.isRecycled()) {
-                    frame.recycle();
-                }
+                releaseFrame(frame);
                 return;
             }
 
@@ -93,7 +91,15 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         root = new FrameLayout(this);
 
-        renderer = new FrameRenderer(this);
+        renderer = new FrameRenderer(
+                this,
+                new FrameRenderer.FrameReleaser() {
+                    @Override
+                    public void release(Bitmap bitmap) {
+                        releaseFrame(bitmap);
+                    }
+                }
+        );
 
         root.addView(renderer, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -140,6 +146,18 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
             applyFullscreen();
         }
     }
+
+    private void releaseFrame(Bitmap frame) {
+            if (frame == null || frame.isRecycled()) {
+                return;
+            }
+
+            if (receiver != null) {
+                receiver.releaseBitmap(frame);
+            } else {
+                frame.recycle();
+            }
+        }
 
     private void createExitOverlay() {
         exitOverlay = new FrameLayout(this);
@@ -249,7 +267,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         synchronized (frameLock) {
 
             if (destroyed) {
-                frame.recycle();
+                releaseFrame(frame);
                 return;
             }
 
@@ -286,7 +304,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         synchronized (frameLock) {
             if (pendingFrame != null && !pendingFrame.isRecycled()) {
-                pendingFrame.recycle();
+                releaseFrame(pendingFrame);
             }
 
             pendingFrame = null;

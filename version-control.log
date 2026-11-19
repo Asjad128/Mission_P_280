@@ -1,0 +1,43 @@
+20-11-2026
+
+2. Optimization approach
+I recommend a controlled three-buffer pipeline.
+Proposed bitmap pipeline
+Buffer A — Decoder
+
+Receives the next JPEG frame
+
+
+Buffer B — Pending frame
+
+Holds the newest decoded frame
+
+
+Buffer C — Rendering
+
+UI draws without decoder modification
+
+Conceptual ownership model. Buffers must be recycled only after their previous owner releases them.
+This should reduce allocation pressure and prevent outdated frames from accumulating. It does not guarantee faster JPEG decoding, so we'll measure that independently.
+
+Preserve the current working APK and source files as rollback points.
+
+
+
+Implement safe bitmap reuse in UsbReceiver.java.
+
+
+
+Modify MainActivity.java to manage buffer ownership.
+
+
+
+Modify FrameRenderer.java to release buffers safely.
+
+
+
+Build and test on the actual tablet.
+
+
+
+Compare FPS, decode time, latency and memory usage.

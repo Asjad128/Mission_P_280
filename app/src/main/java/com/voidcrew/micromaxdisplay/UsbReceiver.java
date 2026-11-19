@@ -5,6 +5,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.util.Log;
 
+import java.util.ArrayList;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -52,6 +53,52 @@ public final class UsbReceiver {
 
     private final BitmapFactory.Options decodeOptions =
             new BitmapFactory.Options();
+    
+    private final Object bitmapPoolLock = new Object();
+    private final ArrayList<Bitmap> bitmapPool = new ArrayList<Bitmap>();
+
+    private static final int MAX_BITMAP_POOL_SIZE = 3;
+
+    private Bitmap acquireBitmap() {
+        synchronized (bitmapPoolLock) {
+            int size = bitmapPool.size();
+
+            if (size == 0) {
+                return null;
+            }
+
+            return bitmapPool.remove(size - 1);
+        }
+    }
+
+    public void releaseBitmap(Bitmap bitmap) {
+        if (bitmap == null || bitmap.isRecycled()) {
+            return;
+        }
+
+        synchronized (bitmapPoolLock) {
+            if (!running || bitmapPool.size() >= MAX_BITMAP_POOL_SIZE) {
+                bitmap.recycle();
+                return;
+            }
+
+            bitmapPool.add(bitmap);
+        }
+    }
+
+    private void clearBitmapPool() {
+        synchronized (bitmapPoolLock) {
+            for (int i = 0; i < bitmapPool.size(); i++) {
+                Bitmap bitmap = bitmapPool.get(i);
+
+                if (bitmap != null && !bitmap.isRecycled()) {
+                    bitmap.recycle();
+                }
+            }
+
+            bitmapPool.clear();
+        }
+    }
 
     public UsbReceiver(Listener listener) {
         this.listener = listener;
@@ -98,6 +145,7 @@ public final class UsbReceiver {
         closeClient();
         closeServer();
 
+
         Thread receiver;
         Thread decoder;
 
@@ -116,6 +164,7 @@ public final class UsbReceiver {
         if (decoder != null) {
             decoder.interrupt();
         }
+        clearBitmapPool();
     }
 
     private void runServer() {
@@ -256,12 +305,40 @@ public final class UsbReceiver {
             // Decode the JPEG only once.
             long decodeStart = System.nanoTime();
 
-            Bitmap frame = BitmapFactory.decodeByteArray(
-                    jpeg,
-                    0,
-                    jpeg.length,
-                    decodeOptions
-            );
+            Bitmap reusableBitmap = acquireBitmap();
+            Bitmap frame = null;
+
+            if (reusableBitmap != null) {
+                decodeOptions.inBitmap = reusableBitmap;
+
+                try {
+                    frame = BitmapFactory.decodeByteArray(
+                            jpeg,
+                            0,
+                            jpeg.length,
+                            decodeOptions
+                    );
+
+                } catch (IllegalArgumentException exception) {
+                    // Android 4.2.2 requires compatible bitmap dimensions.
+                    // Fall back to a normal decode if the bitmap is incompatible.
+                    reusableBitmap.recycle();
+
+                } finally {
+                    decodeOptions.inBitmap = null;
+                }
+            }
+
+            if (frame == null) {
+                decodeOptions.inBitmap = null;
+
+                frame = BitmapFactory.decodeByteArray(
+                        jpeg,
+                        0,
+                        jpeg.length,
+                        decodeOptions
+                );
+            }
 
             long decodeDuration =
                     System.nanoTime() - decodeStart;

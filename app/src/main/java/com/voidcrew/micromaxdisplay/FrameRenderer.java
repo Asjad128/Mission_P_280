@@ -47,8 +47,19 @@ public final class FrameRenderer extends View {
     private long maxDrawIntervalNanos = 0;
     private int intervalCount = 0;
 
-    public FrameRenderer(Context context) {
+    public interface FrameReleaser {
+    void release(Bitmap bitmap);
+    }
+
+    private final FrameReleaser frameReleaser;
+
+    public FrameRenderer(
+        Context context,
+        FrameReleaser frameReleaser) {
+
         super(context);
+
+        this.frameReleaser = frameReleaser;
 
         paint = new Paint(Paint.FILTER_BITMAP_FLAG);
         paint.setAntiAlias(false);
@@ -63,10 +74,9 @@ public final class FrameRenderer extends View {
             return;
         }
 
-        // Frames are delivered through MainActivity's main-thread handler.
-        if (latestFrame != null && latestFrame != frame
+       if (latestFrame != null && latestFrame != frame
                 && !latestFrame.isRecycled()) {
-            latestFrame.recycle();
+            frameReleaser.release(latestFrame);
         }
 
         latestFrame = frame;
@@ -255,12 +265,12 @@ public final class FrameRenderer extends View {
 
     public void shutdown() {
 
-        stopped = true;
+            stopped = true;
 
-        if (latestFrame != null && !latestFrame.isRecycled()) {
-            latestFrame.recycle();
+            if (latestFrame != null && !latestFrame.isRecycled()) {
+                frameReleaser.release(latestFrame);
+            }
+
+            latestFrame = null;
         }
-
-        latestFrame = null;
-    }
 }
