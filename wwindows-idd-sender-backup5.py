@@ -19,7 +19,7 @@ ADB = r"F:\platform-tools\adb.exe"
 PORT = 27183
 
 DEVICE_IDX = 0
-OUTPUT_IDX = 3
+OUTPUT_IDX = 1
 
 WIDTH = 200 * 4
 HEIGHT = 120 * 4

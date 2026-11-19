@@ -18,11 +18,11 @@ ADB = r"F:\platform-tools\adb.exe"
 PORT = 27183
 
 DEVICE_IDX = 0
-OUTPUT_IDX = 3
+OUTPUT_IDX = 1
 
 # Frame size sent to the tablet (always landscape, 5:3 like 800x480).
-WIDTH = 200 * 7
-HEIGHT = 120 * 7
+WIDTH = 200 * 5
+HEIGHT = 120 * 5
 
 # ROTATION controls how the captured frame is turned before sending:
 #   "ccw"  - always rotate 90 degrees counter-clockwise (verified correct
