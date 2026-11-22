@@ -46,6 +46,7 @@ public final class IdleView extends View {
     private long lastMinute = -1;
 
     private String statusText = "";
+    private int state = UsbReceiver.STATE_STARTING;
     private int theme = 0;
 
     private long lastShiftTime = 0;
@@ -106,6 +107,38 @@ public final class IdleView extends View {
 
     public void setStatus(String status) {
         statusText = status == null ? "" : status;
+    }
+
+
+    private String labelForState() {
+        switch (state) {
+            case UsbReceiver.STATE_WAITING:
+                return "Waiting for Windows\u2026";
+            case UsbReceiver.STATE_CONNECTED:
+                return "Connected \u2013 starting stream\u2026";
+            case UsbReceiver.STATE_STREAMING:
+                return "Streaming";
+            case UsbReceiver.STATE_LOST:
+                return "Connection lost";
+            case UsbReceiver.STATE_ERROR:
+                return "Connection error";
+            default:
+                return "Starting receiver\u2026";
+        }
+    }
+
+    private int colorForState() {
+        switch (state) {
+            case UsbReceiver.STATE_CONNECTED:
+            case UsbReceiver.STATE_STREAMING:
+                return 0xFF66BB6A;   // green
+            case UsbReceiver.STATE_LOST:
+                return 0xFFFFA726;   // orange
+            case UsbReceiver.STATE_ERROR:
+                return 0xFFEF5350;   // red
+            default:
+                return 0xFF4FC3F7;   // blue
+        }
     }
 
     public void start() {
@@ -170,7 +203,9 @@ public final class IdleView extends View {
         float pulse = (float) (0.5 + 0.5 * Math.sin(now / 380.0));
 
         float statusY = h * 0.90f;
-        String label = "Waiting for Windows\u2026";
+        
+        String label = labelForState();
+        dotPaint.setColor(colorForState());
 
         float labelWidth = statusPaint.measureText(label);
         float dotRadius = base * 0.012f * (0.8f + 0.4f * pulse);

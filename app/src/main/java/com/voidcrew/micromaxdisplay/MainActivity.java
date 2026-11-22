@@ -31,6 +31,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     private volatile boolean destroyed = false;
 
     private boolean idleShowing = false;       // NEW
+    private volatile int connState = UsbReceiver.STATE_STARTING;
     private volatile long lastFrameTime = 0;   // NEW
 
     private float swipeStartY;
@@ -48,6 +49,21 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         }
     };
 
+    @Override
+    public void onConnectionState(final int state) {
+        connState = state;
+
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (destroyed || idleView == null) {
+                    return;
+                }
+                idleView.setState(state);
+                showIdle();   // every state except streaming shows the idle screen
+            }
+        });
+    }
     // NEW: brings the idle screen back if no frames arrive for 3 seconds
     private final Runnable idleWatchdog = new Runnable() {
         @Override
@@ -82,8 +98,19 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 releaseFrame(frame);
                 return;
             }
+            // Drop late frames that arrive after a disconnect.
+            if (connState != UsbReceiver.STATE_CONNECTED
+                    && connState != UsbReceiver.STATE_STREAMING) {
+                releaseFrame(frame);
+                return;
+            }
 
-            hideIdle();                        // NEW
+            if (connState != UsbReceiver.STATE_STREAMING) {
+                connState = UsbReceiver.STATE_STREAMING;
+                idleView.setState(UsbReceiver.STATE_STREAMING);
+            }
+
+            hideIdle();
             renderer.displayFrame(frame);
         }
     };

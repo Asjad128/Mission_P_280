@@ -23,11 +23,19 @@ public final class UsbReceiver {
     private static final String TAG = "UsbReceiver";
     private static final int MAX_FRAME_SIZE = 4 * 1024 * 1024;
     private static final int HEADER_SIZE = 4;
+    public static final int STATE_STARTING = 0;
+    public static final int STATE_WAITING = 1;
+    public static final int STATE_CONNECTED = 2;
+    public static final int STATE_STREAMING = 3;
+    public static final int STATE_LOST = 4;
+    public static final int STATE_ERROR = 5;
+
 
     public interface Listener {
         void onStatus(String status);
         void onFrame(Bitmap frame);
         void onError(String message, Exception exception);
+        void onConnectionState(int state);
     }
 
     private final Listener listener;
@@ -175,43 +183,50 @@ public final class UsbReceiver {
             listener.onStatus("Listening on port " + PORT);
 
             while (running) {
+                listener.onConnectionState(STATE_WAITING);
                 listener.onStatus("Waiting for Windows...");
+
+                boolean wasConnected = false;
 
                 try {
                     clientSocket = serverSocket.accept();
                     clientSocket.setTcpNoDelay(true);
 
+                    wasConnected = true;
+                    listener.onConnectionState(STATE_CONNECTED);
                     listener.onStatus("Windows connected");
 
                     receiveFrames(clientSocket);
 
                 } catch (SocketException exception) {
                     if (running) {
-                        listener.onError(
-                                "Receiver socket error",
-                                exception
-                        );
+                        listener.onError("Receiver socket error", exception);
                     }
 
                 } catch (IOException exception) {
                     if (running) {
-                        listener.onError(
-                                "Connection error",
-                                exception
-                        );
+                        listener.onError("Connection error", exception);
                     }
 
                 } finally {
                     closeClient();
                 }
 
-                if (running) {
+                if (running && wasConnected) {
+                    listener.onConnectionState(STATE_LOST);
                     listener.onStatus("Connection lost");
+
+                    // Let "Connection lost" be visible briefly.
+                    try {
+                        Thread.sleep(1500);
+                    } catch (InterruptedException ignored) {
+                    }
                 }
             }
 
         } catch (IOException exception) {
             if (running) {
+                listener.onConnectionState(STATE_ERROR);
                 listener.onError(
                         "Unable to listen on port " + PORT,
                         exception
