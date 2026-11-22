@@ -1,5 +1,6 @@
 package com.voidcrew.micromaxdisplay;
 
+import android.os.Build;
 import android.app.Activity;
 import android.content.pm.ActivityInfo;
 import android.graphics.Bitmap;
@@ -44,6 +45,26 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         @Override
         public void run() {
             hideExitOverlay();
+        }
+    };
+
+    private final Runnable fadeStatusRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (statusView == null) {
+                return;
+            }
+            statusView.animate()
+                    .alpha(0f)
+                    .setDuration(500)
+                    .withEndAction(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (statusView != null) {
+                                statusView.setVisibility(View.GONE);
+                            }
+                        }
+                    });
         }
     };
 
@@ -172,6 +193,17 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         showIdle();
     }
 
+    private void showStatusBriefly() {
+        if (statusView == null) {
+            return;
+        }
+        mainHandler.removeCallbacks(fadeStatusRunnable);
+        statusView.animate().cancel();
+        statusView.setAlpha(1f);
+        statusView.setVisibility(View.VISIBLE);
+        mainHandler.postDelayed(fadeStatusRunnable, 2000);
+    }
+
     // NEW
     private void showIdle() {
         if (idleView == null) {
@@ -182,6 +214,8 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         idleView.setAlpha(1f);
         idleView.setVisibility(View.VISIBLE);
         idleView.start();
+        mainHandler.removeCallbacks(fadeStatusRunnable);
+        statusView.animate().cancel();
         statusView.setVisibility(View.GONE);
     }
 
@@ -191,7 +225,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
             return;
         }
         idleShowing = false;
-        statusView.setVisibility(View.VISIBLE);
+        showStatusBriefly();
         idleView.animate()
                 .alpha(0f)
                 .setDuration(400)
@@ -206,11 +240,17 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 });
     }
 
-    private void applyFullscreen() {
-        getWindow().getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-        );
+   private void applyFullscreen() {
+        int flags = View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+
+        if (Build.VERSION.SDK_INT >= 19) {
+            flags |= View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
+        }
+
+        getWindow().getDecorView().setSystemUiVisibility(flags);
     }
 
     @Override
@@ -429,6 +469,9 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
             public void run() {
                 if (!destroyed && statusView != null) {
                     statusView.setText(status);
+                    if (!idleShowing) {
+                        showStatusBriefly();
+                    }
                     if (idleView != null) {          // NEW
                         idleView.setStatus(status);
                     }
