@@ -32,7 +32,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
     private boolean idleShowing = false;       // NEW
     private volatile int connState = UsbReceiver.STATE_STARTING;
-    private volatile long lastFrameTime = 0;   // NEW
 
     private float swipeStartY;
     private float swipeStartX;
@@ -40,7 +39,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     private static final int SWIPE_THRESHOLD = 80;
     private static final int TOP_EDGE_LIMIT = 60;
     private static final long OVERLAY_TIMEOUT = 3000;
-    private static final long IDLE_TIMEOUT_MS = 3000;   // NEW
 
     private final Runnable hideOverlayRunnable = new Runnable() {
         @Override
@@ -64,20 +62,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
             }
         });
     }
-    // NEW: brings the idle screen back if no frames arrive for 3 seconds
-    private final Runnable idleWatchdog = new Runnable() {
-        @Override
-        public void run() {
-            if (destroyed) {
-                return;
-            }
-            if (!idleShowing
-                    && System.currentTimeMillis() - lastFrameTime > IDLE_TIMEOUT_MS) {
-                showIdle();
-            }
-            mainHandler.postDelayed(this, 1000);
-        }
-    };
 
     private final Runnable frameUpdateRunnable = new Runnable() {
         @Override
@@ -186,7 +170,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         // NEW
         showIdle();
-        mainHandler.postDelayed(idleWatchdog, 1000);
     }
 
     // NEW
@@ -374,7 +357,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
             return;
         }
 
-        lastFrameTime = System.currentTimeMillis();   // NEW
 
         synchronized (frameLock) {
 
