@@ -18,7 +18,7 @@ import java.util.Random;
 public final class IdleView extends View {
 
     private static final long FRAME_DELAY_MS = 33;
-    private static final long SHIFT_INTERVAL_MS = 60_000L;
+    private static final long SHIFT_INTERVAL_MS = 60000L;
     private static final int SHIFT_RANGE_PX = 24;
 
     // Base hue pairs (degrees) for tap-to-cycle themes.
@@ -46,7 +46,7 @@ public final class IdleView extends View {
     private long lastMinute = -1;
 
     private String statusText = "";
-    private int state = UsbReceiver.STATE_STARTING;
+    private int state = UsbReceiver.STATE_STARTING;   // NEW
     private int theme = 0;
 
     private long lastShiftTime = 0;
@@ -109,7 +109,12 @@ public final class IdleView extends View {
         statusText = status == null ? "" : status;
     }
 
+    // NEW
+    public void setState(int newState) {
+        state = newState;
+    }
 
+    // NEW
     private String labelForState() {
         switch (state) {
             case UsbReceiver.STATE_WAITING:
@@ -127,6 +132,7 @@ public final class IdleView extends View {
         }
     }
 
+    // NEW
     private int colorForState() {
         switch (state) {
             case UsbReceiver.STATE_CONNECTED:
@@ -203,9 +209,8 @@ public final class IdleView extends View {
         float pulse = (float) (0.5 + 0.5 * Math.sin(now / 380.0));
 
         float statusY = h * 0.90f;
-        
-        String label = labelForState();
-        dotPaint.setColor(colorForState());
+        String label = labelForState();          // CHANGED
+        dotPaint.setColor(colorForState());      // NEW
 
         float labelWidth = statusPaint.measureText(label);
         float dotRadius = base * 0.012f * (0.8f + 0.4f * pulse);
@@ -251,7 +256,7 @@ public final class IdleView extends View {
     }
 
     private void updateTexts(long now) {
-        long minute = now / 60_000L;
+        long minute = now / 60000L;
         if (minute == lastMinute) {
             return;
         }
