@@ -1,4 +1,3 @@
-
 package com.voidcrew.micromaxdisplay;
 
 import android.app.Activity;
@@ -22,6 +21,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
     private FrameLayout root;
     private FrameRenderer renderer;
+    private IdleView idleView;                 // NEW
     private TextView statusView;
     private FrameLayout exitOverlay;
     private UsbReceiver receiver;
@@ -30,17 +30,36 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     private boolean frameUpdatePosted = false;
     private volatile boolean destroyed = false;
 
+    private boolean idleShowing = false;       // NEW
+    private volatile long lastFrameTime = 0;   // NEW
+
     private float swipeStartY;
     private float swipeStartX;
 
     private static final int SWIPE_THRESHOLD = 80;
     private static final int TOP_EDGE_LIMIT = 60;
     private static final long OVERLAY_TIMEOUT = 3000;
+    private static final long IDLE_TIMEOUT_MS = 3000;   // NEW
 
     private final Runnable hideOverlayRunnable = new Runnable() {
         @Override
         public void run() {
             hideExitOverlay();
+        }
+    };
+
+    // NEW: brings the idle screen back if no frames arrive for 3 seconds
+    private final Runnable idleWatchdog = new Runnable() {
+        @Override
+        public void run() {
+            if (destroyed) {
+                return;
+            }
+            if (!idleShowing
+                    && System.currentTimeMillis() - lastFrameTime > IDLE_TIMEOUT_MS) {
+                showIdle();
+            }
+            mainHandler.postDelayed(this, 1000);
         }
     };
 
@@ -64,6 +83,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 return;
             }
 
+            hideIdle();                        // NEW
             renderer.displayFrame(frame);
         }
     };
@@ -106,6 +126,13 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 FrameLayout.LayoutParams.MATCH_PARENT
         ));
 
+        // NEW: idle screen sits on top of the renderer
+        idleView = new IdleView(this);
+        root.addView(idleView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+        ));
+
         statusView = new TextView(this);
         statusView.setText("Starting receiver...");
         statusView.setTextColor(0xffffffff);
@@ -129,6 +156,44 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         receiver = new UsbReceiver(this);
         receiver.start();
+
+        // NEW
+        showIdle();
+        mainHandler.postDelayed(idleWatchdog, 1000);
+    }
+
+    // NEW
+    private void showIdle() {
+        if (idleView == null) {
+            return;
+        }
+        idleShowing = true;
+        idleView.animate().cancel();
+        idleView.setAlpha(1f);
+        idleView.setVisibility(View.VISIBLE);
+        idleView.start();
+        statusView.setVisibility(View.GONE);
+    }
+
+    // NEW
+    private void hideIdle() {
+        if (idleView == null || !idleShowing) {
+            return;
+        }
+        idleShowing = false;
+        statusView.setVisibility(View.VISIBLE);
+        idleView.animate()
+                .alpha(0f)
+                .setDuration(400)
+                .withEndAction(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!idleShowing && idleView != null) {
+                            idleView.stop();
+                            idleView.setVisibility(View.GONE);
+                        }
+                    }
+                });
     }
 
     private void applyFullscreen() {
@@ -147,17 +212,35 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         }
     }
 
-    private void releaseFrame(Bitmap frame) {
-            if (frame == null || frame.isRecycled()) {
-                return;
-            }
-
-            if (receiver != null) {
-                receiver.releaseBitmap(frame);
-            } else {
-                frame.recycle();
-            }
+    // NEW
+    @Override
+    protected void onPause() {
+        if (idleView != null) {
+            idleView.stop();
         }
+        super.onPause();
+    }
+
+    // NEW
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (idleView != null && idleShowing) {
+            idleView.start();
+        }
+    }
+
+    private void releaseFrame(Bitmap frame) {
+        if (frame == null || frame.isRecycled()) {
+            return;
+        }
+
+        if (receiver != null) {
+            receiver.releaseBitmap(frame);
+        } else {
+            frame.recycle();
+        }
+    }
 
     private void createExitOverlay() {
         exitOverlay = new FrameLayout(this);
@@ -264,6 +347,8 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
             return;
         }
 
+        lastFrameTime = System.currentTimeMillis();   // NEW
+
         synchronized (frameLock) {
 
             if (destroyed) {
@@ -273,7 +358,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
             if (pendingFrame != null && pendingFrame != frame
                     && !pendingFrame.isRecycled()) {
-                pendingFrame.recycle();
+                releaseFrame(pendingFrame);           // CHANGED (was recycle())
             }
 
             pendingFrame = frame;
@@ -296,6 +381,10 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         destroyed = true;
 
         mainHandler.removeCallbacks(hideOverlayRunnable);
+
+        if (idleView != null) {                       // NEW
+            idleView.stop();
+        }
 
         if (receiver != null) {
             receiver.stop();
@@ -331,6 +420,9 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
             public void run() {
                 if (!destroyed && statusView != null) {
                     statusView.setText(status);
+                    if (idleView != null) {          // NEW
+                        idleView.setStatus(status);
+                    }
                 }
             }
         });
