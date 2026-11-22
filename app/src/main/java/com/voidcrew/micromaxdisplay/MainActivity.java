@@ -1,9 +1,9 @@
 package com.voidcrew.micromaxdisplay;
 
-import android.os.Build;
 import android.app.Activity;
 import android.content.pm.ActivityInfo;
 import android.graphics.Bitmap;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.view.Gravity;
@@ -22,16 +22,20 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
     private FrameLayout root;
     private FrameRenderer renderer;
-    private IdleView idleView;                 // NEW
+    private IdleView idleView;
     private TextView statusView;
     private FrameLayout exitOverlay;
     private UsbReceiver receiver;
+
+    private View nightOverlay;                 // NEW: warm tint / dim layer
+    private NightLightPanel nightPanel;        // NEW: settings card
+    private ImageButton settingsButton;        // NEW: gear on idle screen
 
     private Bitmap pendingFrame;
     private boolean frameUpdatePosted = false;
     private volatile boolean destroyed = false;
 
-    private boolean idleShowing = false;       // NEW
+    private boolean idleShowing = false;
     private volatile int connState = UsbReceiver.STATE_STARTING;
 
     private float swipeStartY;
@@ -68,22 +72,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         }
     };
 
-    @Override
-    public void onConnectionState(final int state) {
-        connState = state;
-
-        mainHandler.post(new Runnable() {
-            @Override
-            public void run() {
-                if (destroyed || idleView == null) {
-                    return;
-                }
-                idleView.setState(state);
-                showIdle();   // every state except streaming shows the idle screen
-            }
-        });
-    }
-
     private final Runnable frameUpdateRunnable = new Runnable() {
         @Override
         public void run() {
@@ -103,6 +91,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 releaseFrame(frame);
                 return;
             }
+
             // Drop late frames that arrive after a disconnect.
             if (connState != UsbReceiver.STATE_CONNECTED
                     && connState != UsbReceiver.STATE_STREAMING) {
@@ -158,7 +147,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 FrameLayout.LayoutParams.MATCH_PARENT
         ));
 
-        // NEW: idle screen sits on top of the renderer
         idleView = new IdleView(this);
         root.addView(idleView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -182,15 +170,77 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         root.addView(statusView, statusParams);
 
+        // NEW: night filter sits above the video, idle screen and status.
+        // It is not clickable, so touches pass straight through it.
+        nightOverlay = new View(this);
+        nightOverlay.setVisibility(View.GONE);
+        root.addView(nightOverlay, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+        ));
+
         createExitOverlay();
+
+        // NEW: gear button, visible on the idle screen only.
+        settingsButton = new ImageButton(this);
+        settingsButton.setImageResource(android.R.drawable.ic_menu_preferences);
+        settingsButton.setBackgroundColor(0x00000000);
+        settingsButton.setAlpha(0.7f);
+        settingsButton.setContentDescription("Night light settings");
+        settingsButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                nightPanel.show();
+            }
+        });
+
+        FrameLayout.LayoutParams gearParams =
+                new FrameLayout.LayoutParams(dp(52), dp(52),
+                        Gravity.TOP | Gravity.LEFT);
+        gearParams.leftMargin = dp(12);
+        gearParams.topMargin = dp(12);
+        root.addView(settingsButton, gearParams);
+
+        // NEW: settings card, on top of everything.
+        nightPanel = new NightLightPanel(this, new NightLightPanel.Listener() {
+            @Override
+            public void onNightLightChanged() {
+                applyNightFilter();
+            }
+        });
+        root.addView(nightPanel, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+        ));
+
+        applyNightFilter();
 
         setContentView(root);
 
         receiver = new UsbReceiver(this);
         receiver.start();
 
-        // NEW
         showIdle();
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    // NEW
+    private void applyNightFilter() {
+        if (nightOverlay == null || nightPanel == null) {
+            return;
+        }
+
+        int color = nightPanel.getOverlayColor();
+
+        if (nightPanel.isFilterEnabled() && color != 0) {
+            nightOverlay.setBackgroundColor(color);
+            nightOverlay.setVisibility(View.VISIBLE);
+        } else {
+            nightOverlay.setVisibility(View.GONE);
+        }
     }
 
     private void showStatusBriefly() {
@@ -204,7 +254,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         mainHandler.postDelayed(fadeStatusRunnable, 2000);
     }
 
-    // NEW
     private void showIdle() {
         if (idleView == null) {
             return;
@@ -214,18 +263,27 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         idleView.setAlpha(1f);
         idleView.setVisibility(View.VISIBLE);
         idleView.start();
+
         mainHandler.removeCallbacks(fadeStatusRunnable);
         statusView.animate().cancel();
         statusView.setVisibility(View.GONE);
+
+        if (settingsButton != null) {
+            settingsButton.setVisibility(View.VISIBLE);
+        }
     }
 
-    // NEW
     private void hideIdle() {
         if (idleView == null || !idleShowing) {
             return;
         }
         idleShowing = false;
         showStatusBriefly();
+
+        if (settingsButton != null) {
+            settingsButton.setVisibility(View.GONE);
+        }
+
         idleView.animate()
                 .alpha(0f)
                 .setDuration(400)
@@ -240,7 +298,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 });
     }
 
-   private void applyFullscreen() {
+    private void applyFullscreen() {
         int flags = View.SYSTEM_UI_FLAG_FULLSCREEN
                 | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                 | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
@@ -262,7 +320,16 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         }
     }
 
-    // NEW
+    // NEW: Back closes the settings card first.
+    @Override
+    public void onBackPressed() {
+        if (nightPanel != null && nightPanel.isShowing()) {
+            nightPanel.hide();
+            return;
+        }
+        super.onBackPressed();
+    }
+
     @Override
     protected void onPause() {
         if (idleView != null) {
@@ -271,7 +338,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         super.onPause();
     }
 
-    // NEW
     @Override
     protected void onResume() {
         super.onResume();
@@ -296,6 +362,29 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         exitOverlay = new FrameLayout(this);
         exitOverlay.setBackgroundColor(0xdd202020);
         exitOverlay.setVisibility(View.GONE);
+
+        // NEW: "Night light" button on the left of the swipe-down bar.
+        TextView nightButton = new TextView(this);
+        nightButton.setText("Night light");
+        nightButton.setTextColor(0xffffffff);
+        nightButton.setTextSize(16);
+        nightButton.setGravity(Gravity.CENTER_VERTICAL);
+        nightButton.setPadding(dp(20), 0, dp(20), 0);
+        nightButton.setClickable(true);
+        nightButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                mainHandler.removeCallbacks(hideOverlayRunnable);
+                hideExitOverlay();
+                nightPanel.show();
+            }
+        });
+
+        exitOverlay.addView(nightButton, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.LEFT | Gravity.CENTER_VERTICAL
+        ));
 
         ImageButton exitButton = new ImageButton(this);
         exitButton.setImageResource(android.R.drawable.ic_menu_close_clear_cancel);
@@ -391,12 +480,27 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     }
 
     @Override
+    public void onConnectionState(final int state) {
+        connState = state;
+
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (destroyed || idleView == null) {
+                    return;
+                }
+                idleView.setState(state);
+                showIdle();   // every state except streaming shows the idle screen
+            }
+        });
+    }
+
+    @Override
     public void onFrame(final Bitmap frame) {
 
         if (frame == null || frame.isRecycled()) {
             return;
         }
-
 
         synchronized (frameLock) {
 
@@ -407,7 +511,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
             if (pendingFrame != null && pendingFrame != frame
                     && !pendingFrame.isRecycled()) {
-                releaseFrame(pendingFrame);           // CHANGED (was recycle())
+                releaseFrame(pendingFrame);
             }
 
             pendingFrame = frame;
@@ -431,7 +535,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         mainHandler.removeCallbacks(hideOverlayRunnable);
 
-        if (idleView != null) {                       // NEW
+        if (idleView != null) {
             idleView.stop();
         }
 
@@ -472,7 +576,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                     if (!idleShowing) {
                         showStatusBriefly();
                     }
-                    if (idleView != null) {          // NEW
+                    if (idleView != null) {
                         idleView.setStatus(status);
                     }
                 }
