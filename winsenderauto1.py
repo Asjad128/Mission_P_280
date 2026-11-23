@@ -45,12 +45,26 @@ FIT_MODE = "letterbox"
 
 CAPTURE_FPS = 30
 SEND_FPS = 20
-JPEG_QUALITY = 20
+JPEG_QUALITY = 50
 
 SEND_BUFFER = 128 * 1024
 
 FRAME_INTERVAL = 1.0 / SEND_FPS
 
+# --------------------------------------------------
+# TOUCH INPUT PROTOCOL
+# --------------------------------------------------
+
+# TCH1 | action:u8 | pointer_id:u8 | reserved:u16 | x:f32 | y:f32
+TOUCH_PACKET = struct.Struct("!4sBBHff")
+
+TOUCH_ACTIONS = {
+    0: "HELLO",
+    1: "DOWN",
+    2: "MOVE",
+    3: "UP",
+    4: "CANCEL",
+}
 
 # --------------------------------------------------
 # SHARED STATE
@@ -395,6 +409,74 @@ def encode_worker():
 
 
 # --------------------------------------------------
+# TOUCH INPUT RECEIVER
+# --------------------------------------------------
+
+def recv_exact(sock, size):
+    data = bytearray()
+
+    while len(data) < size and not stop_event.is_set():
+        try:
+            chunk = sock.recv(size - len(data))
+
+        except socket.timeout:
+            continue
+
+        if not chunk:
+            return None
+
+        data.extend(chunk)
+
+    if len(data) != size:
+        return None
+
+    return bytes(data)
+
+
+def touch_reader_worker(sock):
+    print("Touch reader started.")
+
+    try:
+        while not stop_event.is_set():
+
+            packet = recv_exact(sock, TOUCH_PACKET.size)
+
+            if packet is None:
+                break
+
+            magic, action, pointer_id, reserved, x, y = (
+                TOUCH_PACKET.unpack(packet)
+            )
+
+            if magic != b"TCH1":
+                print("Invalid touch packet:", magic)
+                continue
+
+            action_name = TOUCH_ACTIONS.get(
+                action,
+                f"UNKNOWN({action})"
+            )
+
+            if action == 0:
+                print("Touch channel ready: Android handshake received.")
+                continue
+
+            print(
+                f"Touch RX | Action: {action_name}"
+                f" | Pointer: {pointer_id}"
+                f" | X: {x:.4f}"
+                f" | Y: {y:.4f}"
+            )
+
+    except OSError as error:
+        if not stop_event.is_set():
+            print("Touch reader error:", error)
+
+    finally:
+        print("Touch reader stopped.")
+
+
+# --------------------------------------------------
 # TRANSMISSION WORKER
 # --------------------------------------------------
 
@@ -442,6 +524,13 @@ def send_worker():
 
             if sock is None:
                 break
+
+            threading.Thread(
+                target=touch_reader_worker,
+                args=(sock,),
+                daemon=True,
+                name="TouchReader"
+            ).start()
 
         try:
             start = time.perf_counter()

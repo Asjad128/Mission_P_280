@@ -9,10 +9,14 @@ import java.util.ArrayList;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.util.Locale;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -23,6 +27,16 @@ public final class UsbReceiver {
     private static final String TAG = "UsbReceiver";
     private static final int MAX_FRAME_SIZE = 4 * 1024 * 1024;
     private static final int HEADER_SIZE = 4;
+
+    // Reverse-direction touch protocol: 16 bytes, big-endian.
+    // TCH1 | action:u8 | pointerId:u8 | reserved:u16 | x:f32 | y:f32
+    public static final int TOUCH_HELLO = 0;
+    public static final int TOUCH_DOWN = 1;
+    public static final int TOUCH_MOVE = 2;
+    public static final int TOUCH_UP = 3;
+    public static final int TOUCH_CANCEL = 4;
+
+    private static final int TOUCH_PACKET_SIZE = 16;
     public static final int STATE_STARTING = 0;
     public static final int STATE_WAITING = 1;
     public static final int STATE_CONNECTED = 2;
@@ -48,6 +62,11 @@ public final class UsbReceiver {
 
     private Thread receiverThread;
     private Thread decoderThread;
+    private volatile Thread touchWriterThread;
+    private volatile Socket touchSocket;
+
+    private final BlockingQueue<byte[]> touchQueue =
+            new ArrayBlockingQueue<byte[]>(128);
 
     // One-slot queue: retain only the newest compressed frame.
     private byte[] latestJpeg;
@@ -151,6 +170,7 @@ public final class UsbReceiver {
             decodeLock.notifyAll();
         }
 
+        stopTouchWriter();
         closeClient();
         closeServer();
 
@@ -196,6 +216,7 @@ public final class UsbReceiver {
                     listener.onConnectionState(STATE_CONNECTED);
                     listener.onStatus("Windows connected");
 
+                    startTouchWriter(clientSocket);
                     receiveFrames(clientSocket);
 
                 } catch (SocketException exception) {
@@ -287,6 +308,150 @@ public final class UsbReceiver {
                 latestJpeg = jpeg;
                 decodeLock.notifyAll();
             }
+        }
+    }
+
+    /**
+     * Queue a normalized touch event for Windows.
+     * Coordinates are in the range 0.0..1.0. Socket I/O is performed
+     * by TouchWriter, never on the caller/UI thread.
+     */
+    public boolean sendTouchEvent(
+            int action,
+            int pointerId,
+            float normalizedX,
+            float normalizedY) {
+
+        if (action < TOUCH_DOWN || action > TOUCH_CANCEL) {
+            return false;
+        }
+
+        if (!running || touchSocket == null || touchSocket.isClosed()) {
+            return false;
+        }
+
+        float x = Math.max(0.0f, Math.min(1.0f, normalizedX));
+        float y = Math.max(0.0f, Math.min(1.0f, normalizedY));
+        byte[] packet = createTouchPacket(action, pointerId, x, y);
+
+        if (touchQueue.offer(packet)) {
+            return true;
+        }
+
+        // Never block the UI thread if the bounded queue is full.
+        // MOVE events are expendable; DOWN/UP/CANCEL transitions are not.
+        if (action == TOUCH_MOVE) {
+            return false;
+        }
+
+        byte[][] retained = new byte[touchQueue.size()][];
+        int count = 0;
+        byte[] queued;
+
+        while ((queued = touchQueue.poll()) != null) {
+            if (queued[4] != (byte) TOUCH_MOVE && count < retained.length) {
+                retained[count++] = queued;
+            }
+        }
+
+        for (int i = 0; i < count; i++) {
+            touchQueue.offer(retained[i]);
+        }
+
+        return touchQueue.offer(packet);
+    }
+
+    private byte[] createTouchPacket(
+            int action,
+            int pointerId,
+            float x,
+            float y) {
+
+        byte[] packet = new byte[TOUCH_PACKET_SIZE];
+
+        packet[0] = 'T';
+        packet[1] = 'C';
+        packet[2] = 'H';
+        packet[3] = '1';
+        packet[4] = (byte) action;
+        packet[5] = (byte) (pointerId & 0xff);
+        packet[6] = 0;
+        packet[7] = 0;
+
+        int xBits = Float.floatToIntBits(x);
+        int yBits = Float.floatToIntBits(y);
+
+        packet[8] = (byte) (xBits >>> 24);
+        packet[9] = (byte) (xBits >>> 16);
+        packet[10] = (byte) (xBits >>> 8);
+        packet[11] = (byte) xBits;
+
+        packet[12] = (byte) (yBits >>> 24);
+        packet[13] = (byte) (yBits >>> 16);
+        packet[14] = (byte) (yBits >>> 8);
+        packet[15] = (byte) yBits;
+
+        return packet;
+    }
+
+    private void startTouchWriter(final Socket socket) {
+        touchQueue.clear();
+        touchSocket = socket;
+
+        touchWriterThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    OutputStream output = socket.getOutputStream();
+
+                    // This packet validates Android -> Windows communication.
+                    output.write(createTouchPacket(
+                            TOUCH_HELLO, 0, 0.0f, 0.0f));
+                    output.flush();
+
+                    Log.i(TAG, "Touch channel handshake sent");
+
+                    while (running
+                            && !socket.isClosed()
+                            && touchSocket == socket) {
+
+                        byte[] packet = touchQueue.poll(
+                                500, TimeUnit.MILLISECONDS);
+
+                        if (packet != null) {
+                            output.write(packet);
+                            output.flush();
+                        }
+                    }
+
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+
+                } catch (IOException exception) {
+                    if (running && !socket.isClosed()) {
+                        Log.w(TAG, "Touch channel writer stopped", exception);
+                    }
+
+                } finally {
+                    if (touchSocket == socket) {
+                        touchSocket = null;
+                    }
+                }
+            }
+        }, "TouchWriter");
+
+        touchWriterThread.start();
+    }
+
+    private void stopTouchWriter() {
+        touchSocket = null;
+        touchQueue.clear();
+
+        Thread writer = touchWriterThread;
+        touchWriterThread = null;
+
+        if (writer != null) {
+            writer.interrupt();
         }
     }
 
@@ -475,6 +640,8 @@ public final class UsbReceiver {
     }
 
     private synchronized void closeClient() {
+        stopTouchWriter();
+
         if (clientSocket != null) {
             try {
                 clientSocket.close();
