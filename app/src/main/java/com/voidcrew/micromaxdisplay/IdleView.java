@@ -35,6 +35,10 @@ public final class IdleView extends View {
     // Tune this if the bottom is still hidden by the bezel (0.05 = 5% of height).
     private static final float SAFE_BOTTOM_FRACTION = 0.05f;
 
+    // Flip animation length in milliseconds. Raise it for a slower flip.
+    private static final long FLIP_MS = 600;
+    private static final int FLIP_SLOTS = 8;
+
     private static final int STYLE_FLIP = 1;
     private static final int STYLE_ANALOG = 2;
 
@@ -55,6 +59,7 @@ public final class IdleView extends View {
     private final Paint dimPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private final Paint cardPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint shadePaint = new Paint();
     private final Paint flipDigitPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint handPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -63,6 +68,7 @@ public final class IdleView extends View {
 
     private final RectF rect = new RectF();
     private final Path boltPath = new Path();
+    private final char[] charBuf = new char[1];
 
     private final Random random = new Random();
     private final Date date = new Date();
@@ -75,6 +81,13 @@ public final class IdleView extends View {
     private String timeText = "";
     private String dateText = "";
     private long lastMinute = -1;
+
+    // Flip animation state. Slots are counted from the right-hand digit,
+    // so "9:59" -> "10:00" still lines up.
+    private final char[] flipCur = new char[FLIP_SLOTS];
+    private final char[] flipPrev = new char[FLIP_SLOTS];
+    private final long[] flipStart = new long[FLIP_SLOTS];
+    private String flipTarget = null;
 
     private String statusText = "";
     private int state = UsbReceiver.STATE_STARTING;
@@ -129,8 +142,12 @@ public final class IdleView extends View {
 
         dotPaint.setColor(0xFF4FC3F7);
 
+        // Opaque, so the folding flap fully hides what is behind it.
         cardPaint.setStyle(Paint.Style.FILL);
-        cardPaint.setColor(0xDD101018);
+        cardPaint.setColor(0xFF101018);
+
+        shadePaint.setStyle(Paint.Style.FILL);
+        shadePaint.setColor(0xFF000000);
 
         flipDigitPaint.setColor(0xFFEEEEEE);
         flipDigitPaint.setTextAlign(Paint.Align.CENTER);
@@ -158,6 +175,7 @@ public final class IdleView extends View {
                 settings.clockStyle =
                         (settings.clockStyle + 1) % AppSettings.CLOCK_STYLE_COUNT;
                 settings.save();
+                flipTarget = null;   // no animation when switching to the flip clock
                 invalidate();
             }
         });
@@ -225,6 +243,7 @@ public final class IdleView extends View {
         }
         running = true;
         lastBatteryTime = 0;
+        flipTarget = null;   // show the current time without a flip
         refreshFormats();
         removeCallbacks(ticker);
         post(ticker);
@@ -342,7 +361,7 @@ public final class IdleView extends View {
 
         switch (settings.clockStyle) {
             case STYLE_FLIP:
-                drawFlipClock(canvas, w, h, base);
+                drawFlipClock(canvas, w, h, base, now);
                 break;
             case STYLE_ANALOG:
                 drawAnalogClock(canvas, w, h, base, now);
@@ -383,11 +402,46 @@ public final class IdleView extends View {
         canvas.drawText(dateText, cx, cy + base * 0.12f, datePaint);
     }
 
-    private void drawFlipClock(Canvas canvas, int w, int h, float base) {
+    // ------------------------------------------------------------- flip clock
+
+    private static char charFromRight(String s, int k) {
+        int idx = s.length() - 1 - k;
+        return idx >= 0 ? s.charAt(idx) : ' ';
+    }
+
+    /** Starts a flip on every slot whose character changed. */
+    private void updateFlipState(long now) {
+        if (flipTarget == null) {
+            for (int k = 0; k < FLIP_SLOTS; k++) {
+                char c = charFromRight(timeText, k);
+                flipCur[k] = c;
+                flipPrev[k] = c;
+                flipStart[k] = 0;
+            }
+            flipTarget = timeText;
+            return;
+        }
+
+        if (!timeText.equals(flipTarget)) {
+            for (int k = 0; k < FLIP_SLOTS; k++) {
+                char c = charFromRight(timeText, k);
+                if (c != flipCur[k]) {
+                    flipPrev[k] = flipCur[k];
+                    flipCur[k] = c;
+                    flipStart[k] = now;
+                }
+            }
+            flipTarget = timeText;
+        }
+    }
+
+    private void drawFlipClock(Canvas canvas, int w, int h, float base, long now) {
         int len = timeText.length();
         if (len == 0) {
             return;
         }
+
+        updateFlipState(now);
 
         int colons = 0;
         for (int i = 0; i < len; i++) {
@@ -424,22 +478,90 @@ public final class IdleView extends View {
                 canvas.drawCircle(dx, cardTop + cardH * 0.64f, dotR, flipDigitPaint);
                 x += colonW + cardW * gap;
             } else {
-                rect.set(x, cardTop, x + cardW, cardTop + cardH);
-                canvas.drawRoundRect(rect, radius, radius, cardPaint);
-
-                canvas.drawText(String.valueOf(ch), x + cardW / 2f, textY, flipDigitPaint);
-
-                float mid = cardTop + cardH / 2f;
-                ringPaint.setColor(0xFF000000);
-                ringPaint.setStrokeWidth(Math.max(2f, cardH * 0.012f));
-                canvas.drawLine(x, mid, x + cardW, mid, ringPaint);
-
+                int k = len - 1 - i;
+                drawFlipCard(canvas, x, cardTop, cardW, cardH, radius, textY, k, now);
                 x += cardW + cardW * gap;
             }
         }
 
         canvas.drawText(dateText, w / 2f, cardTop + cardH + base * 0.10f, datePaint);
     }
+
+    private void drawFlipCard(Canvas canvas, float x, float top, float cw, float ch,
+                              float radius, float textY, int k, long now) {
+
+        long start = flipStart[k];
+        float p = start == 0 ? 1f : (now - start) / (float) FLIP_MS;
+
+        if (p >= 1f) {
+            // Idle: the plain card.
+            drawHalf(canvas, x, top, cw, ch, radius, textY, flipCur[k], true, 1f, 0f);
+            drawHalf(canvas, x, top, cw, ch, radius, textY, flipCur[k], false, 1f, 0f);
+        } else {
+            // Behind the flap: new top half and old bottom half.
+            drawHalf(canvas, x, top, cw, ch, radius, textY, flipCur[k], true, 1f, 0f);
+            drawHalf(canvas, x, top, cw, ch, radius, textY, flipPrev[k], false, 1f, 0f);
+
+            if (p < 0.5f) {
+                // Old top half folds down.
+                float t = p * 2f;
+                float s = 1f - t * t;
+                drawHalf(canvas, x, top, cw, ch, radius, textY, flipPrev[k], true, s, t * 0.55f);
+            } else {
+                // New bottom half unfolds.
+                float t = (p - 0.5f) * 2f;
+                float s = 1f - (1f - t) * (1f - t);
+                drawHalf(canvas, x, top, cw, ch, radius, textY, flipCur[k], false, s, (1f - t) * 0.55f);
+            }
+        }
+
+        // Split line across the middle of the card.
+        float mid = top + ch / 2f;
+        ringPaint.setColor(0xFF000000);
+        ringPaint.setStrokeWidth(Math.max(2f, ch * 0.012f));
+        canvas.drawLine(x, mid, x + cw, mid, ringPaint);
+    }
+
+    /**
+     * Draws the top or bottom half of a card, optionally squashed toward the
+     * middle line (scaleY) and darkened (shade 0..1).
+     */
+    private void drawHalf(Canvas canvas, float x, float top, float cw, float ch,
+                          float radius, float textY, char c, boolean upper,
+                          float scaleY, float shade) {
+
+        if (scaleY <= 0.01f) {
+            return;
+        }
+
+        float mid = top + ch / 2f;
+
+        canvas.save();
+        canvas.scale(1f, scaleY, x + cw / 2f, mid);
+
+        if (upper) {
+            canvas.clipRect(x, top, x + cw, mid);
+        } else {
+            canvas.clipRect(x, mid, x + cw, top + ch);
+        }
+
+        rect.set(x, top, x + cw, top + ch);
+        canvas.drawRoundRect(rect, radius, radius, cardPaint);
+
+        if (c != ' ') {
+            charBuf[0] = c;
+            canvas.drawText(charBuf, 0, 1, x + cw / 2f, textY, flipDigitPaint);
+        }
+
+        if (shade > 0f) {
+            shadePaint.setAlpha((int) (Math.min(1f, shade) * 255f));
+            canvas.drawRect(x, top, x + cw, top + ch, shadePaint);
+        }
+
+        canvas.restore();
+    }
+
+    // ------------------------------------------------------------ analog clock
 
     private void drawAnalogClock(Canvas canvas, int w, int h, float base, long now) {
         cal.setTimeInMillis(now);

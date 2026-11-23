@@ -71,6 +71,19 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         }
     };
 
+    private final Runnable barsWatchdog = new Runnable() {
+        @Override
+        public void run() {
+            if (destroyed) {
+                return;
+            }
+            if (fullscreenMode) {
+                applyFullscreen();
+            }
+            mainHandler.postDelayed(this, 1000);
+        }
+    };
+
     private final Runnable nightTick = new Runnable() {
         @Override
         public void run() {
@@ -160,19 +173,18 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         // NEW: on Android 4.x any touch brings the bars back.
         // When that happens, hide them again right away.
         getWindow().getDecorView().setOnSystemUiVisibilityChangeListener(
-                new View.OnSystemUiVisibilityChangeListener() {
-                    @Override
-                    public void onSystemUiVisibilityChange(int visibility) {
-                        if (!fullscreenMode || destroyed) {
-                            return;
-                        }
-                        if ((visibility & View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) == 0
-                                || (visibility & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) {
-                            mainHandler.removeCallbacks(rehideBarsRunnable);
-                            mainHandler.postDelayed(rehideBarsRunnable, 100);
-                        }
+            new View.OnSystemUiVisibilityChangeListener() {
+                @Override
+                public void onSystemUiVisibilityChange(int visibility) {
+                    if (!fullscreenMode || destroyed) {
+                        return;
                     }
-                });
+                    if ((visibility & View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) == 0
+                            || (visibility & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) {
+                        applyFullscreen();   // immediately, no delay
+                    }
+                }
+            });
 
         root = new FrameLayout(this);
 
@@ -265,6 +277,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         applyNightFilter();
         mainHandler.postDelayed(nightTick, NIGHT_TICK_MS);
+        mainHandler.postDelayed(barsWatchdog, 1000);
 
         receiver = new UsbReceiver(this);
         receiver.start();
@@ -653,6 +666,12 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         }
 
         boolean handled = super.dispatchTouchEvent(event);
+
+        // Android 4.2 clears the hide flags on touch. Put them back right away.
+        if (fullscreenMode) {
+            applyFullscreen();
+            mainHandler.post(rehideBarsRunnable);
+        }
 
         if (idleView != null
                 && (action == MotionEvent.ACTION_UP
