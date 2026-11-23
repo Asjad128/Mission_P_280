@@ -199,6 +199,32 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         );
         renderer.setScaleMode(settings.scaleMode);
 
+        renderer.setTouchListener(new FrameRenderer.TouchListener() {
+            @Override
+            public void onTouch(
+                    int action,
+                    int pointerId,
+                    float normalizedX,
+                    float normalizedY) {
+
+                // Preserve the existing top-edge exit gesture.
+                if (swipeStartY <= TOP_EDGE_LIMIT) {
+                    return;
+                }
+
+                if (receiver != null
+                        && (connState == UsbReceiver.STATE_CONNECTED
+                        || connState == UsbReceiver.STATE_STREAMING)) {
+
+                    receiver.sendTouchEvent(
+                            action,
+                            pointerId,
+                            normalizedX,
+                            normalizedY
+                    );
+                }
+            }
+        });
         root.addView(renderer, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
