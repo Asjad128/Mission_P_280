@@ -1,6 +1,7 @@
 package com.voidcrew.micromaxdisplay;
 
 import android.app.Activity;
+import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.graphics.Bitmap;
 import android.os.Build;
@@ -21,12 +22,14 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     private final Object frameLock = new Object();
 
     private AppSettings settings;
+    private SharedPreferences uiPrefs;
 
     private FrameLayout root;
     private FrameRenderer renderer;
     private IdleView idleView;
     private TextView statusView;
     private FrameLayout exitOverlay;
+    private TextView fullscreenLabel;          // NEW: toggle in the top bar
     private UsbReceiver receiver;
 
     private View nightOverlay;
@@ -40,6 +43,8 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
     private boolean idleShowing = false;
     private volatile int connState = UsbReceiver.STATE_STARTING;
+
+    private boolean fullscreenMode = true;     // NEW
 
     private float swipeStartY;
     private float swipeStartX;
@@ -56,7 +61,16 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         }
     };
 
-    // Re-evaluates the night schedule (and ramp) regularly.
+    // NEW: pushes the system bars back out of sight after a touch.
+    private final Runnable rehideBarsRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!destroyed && fullscreenMode) {
+                applyFullscreen();
+            }
+        }
+    };
+
     private final Runnable nightTick = new Runnable() {
         @Override
         public void run() {
@@ -108,7 +122,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 return;
             }
 
-            // Drop late frames that arrive after a disconnect.
             if (connState != UsbReceiver.STATE_CONNECTED
                     && connState != UsbReceiver.STATE_STREAMING) {
                 releaseFrame(frame);
@@ -131,12 +144,11 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         settings = AppSettings.get(this);
 
-        requestWindowFeature(Window.FEATURE_NO_TITLE);
+        // NEW: remembered full-screen choice (same prefs file, separate key).
+        uiPrefs = getSharedPreferences(AppSettings.PREFS, MODE_PRIVATE);
+        fullscreenMode = uiPrefs.getBoolean("fullscreen", true);
 
-        getWindow().setFlags(
-                WindowManager.LayoutParams.FLAG_FULLSCREEN,
-                WindowManager.LayoutParams.FLAG_FULLSCREEN
-        );
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
 
         setRequestedOrientation(
                 ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
@@ -144,6 +156,23 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         applyFullscreen();
         applyKeepAwake();
+
+        // NEW: on Android 4.x any touch brings the bars back.
+        // When that happens, hide them again right away.
+        getWindow().getDecorView().setOnSystemUiVisibilityChangeListener(
+                new View.OnSystemUiVisibilityChangeListener() {
+                    @Override
+                    public void onSystemUiVisibilityChange(int visibility) {
+                        if (!fullscreenMode || destroyed) {
+                            return;
+                        }
+                        if ((visibility & View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) == 0
+                                || (visibility & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) {
+                            mainHandler.removeCallbacks(rehideBarsRunnable);
+                            mainHandler.postDelayed(rehideBarsRunnable, 100);
+                        }
+                    }
+                });
 
         root = new FrameLayout(this);
 
@@ -193,8 +222,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         root.addView(statusView, statusParams);
 
-        // Night filter: above video, idle screen and status.
-        // Not clickable, so touches pass straight through.
         nightOverlay = new View(this);
         nightOverlay.setVisibility(View.GONE);
         root.addView(nightOverlay, new FrameLayout.LayoutParams(
@@ -204,7 +231,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         createExitOverlay();
 
-        // Gear button on the idle screen.
         settingsButton = new ImageButton(this);
         settingsButton.setImageResource(android.R.drawable.ic_menu_preferences);
         settingsButton.setBackgroundColor(0x00000000);
@@ -224,7 +250,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         gearParams.topMargin = dp(12);
         root.addView(settingsButton, gearParams);
 
-        // Settings card, on top of everything.
         settingsPanel = new SettingsPanel(this, settings, new SettingsPanel.Listener() {
             @Override
             public void onSettingsChanged() {
@@ -249,6 +274,52 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    // ------------------------------------------------------------- full screen
+
+    // CHANGED: respects the full-screen toggle.
+    private void applyFullscreen() {
+        View decor = getWindow().getDecorView();
+
+        if (fullscreenMode) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+
+            int flags = View.SYSTEM_UI_FLAG_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+
+            if (Build.VERSION.SDK_INT >= 19) {
+                flags |= View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
+            }
+
+            decor.setSystemUiVisibility(flags);
+        } else {
+            // Bars visible, and the app is laid out BETWEEN them,
+            // so the whole picture stays visible.
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            decor.setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+        }
+    }
+
+    // NEW
+    private void setFullscreenMode(boolean value) {
+        fullscreenMode = value;
+        uiPrefs.edit().putBoolean("fullscreen", value).apply();
+        mainHandler.removeCallbacks(rehideBarsRunnable);
+        applyFullscreen();
+        updateFullscreenLabel();
+        if (root != null) {
+            root.requestLayout();
+        }
+    }
+
+    // NEW
+    private void updateFullscreenLabel() {
+        if (fullscreenLabel != null) {
+            fullscreenLabel.setText(fullscreenMode ? "Exit full screen" : "Full screen");
+        }
     }
 
     // ---------------------------------------------------------------- settings
@@ -308,7 +379,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         }
     }
 
-    // Lowers the real backlight while the idle screen is auto-dimmed.
     private void applyBacklight(boolean dimmed) {
         WindowManager.LayoutParams lp = getWindow().getAttributes();
         lp.screenBrightness = dimmed
@@ -363,7 +433,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         idleShowing = false;
         showStatusBriefly();
 
-        idleView.resetActivity();   // also restores the backlight if it was dimmed
+        idleView.resetActivity();
         updateGear();
 
         idleView.animate()
@@ -378,19 +448,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                         }
                     }
                 });
-    }
-
-    private void applyFullscreen() {
-        int flags = View.SYSTEM_UI_FLAG_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
-
-        if (Build.VERSION.SDK_INT >= 19) {
-            flags |= View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
-        }
-
-        getWindow().getDecorView().setSystemUiVisibility(flags);
     }
 
     @Override
@@ -422,6 +479,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     @Override
     protected void onResume() {
         super.onResume();
+        applyFullscreen();
         applyNightFilter();
         if (idleView != null && idleShowing) {
             idleView.start();
@@ -445,7 +503,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         exitOverlay.setBackgroundColor(0xdd202020);
         exitOverlay.setVisibility(View.GONE);
 
-        // "Settings" on the left of the swipe-down bar.
+        // Left: Settings.
         TextView settingsLabel = new TextView(this);
         settingsLabel.setText("Settings");
         settingsLabel.setTextColor(0xffffffff);
@@ -468,6 +526,30 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 Gravity.LEFT | Gravity.CENTER_VERTICAL
         ));
 
+        // NEW. Center: Exit full screen / Full screen.
+        fullscreenLabel = new TextView(this);
+        fullscreenLabel.setTextColor(0xffffffff);
+        fullscreenLabel.setTextSize(16);
+        fullscreenLabel.setGravity(Gravity.CENTER);
+        fullscreenLabel.setPadding(dp(20), 0, dp(20), 0);
+        fullscreenLabel.setClickable(true);
+        fullscreenLabel.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                mainHandler.removeCallbacks(hideOverlayRunnable);
+                hideExitOverlay();
+                setFullscreenMode(!fullscreenMode);
+            }
+        });
+        updateFullscreenLabel();
+
+        exitOverlay.addView(fullscreenLabel, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER
+        ));
+
+        // Right: Exit.
         ImageButton exitButton = new ImageButton(this);
         exitButton.setImageResource(android.R.drawable.ic_menu_close_clear_cancel);
         exitButton.setBackgroundColor(0x00000000);
@@ -521,6 +603,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
             return;
         }
 
+        updateFullscreenLabel();
         mainHandler.removeCallbacks(hideOverlayRunnable);
         exitOverlay.setVisibility(View.VISIBLE);
         mainHandler.postDelayed(hideOverlayRunnable, OVERLAY_TIMEOUT);
@@ -532,6 +615,17 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         }
     }
 
+    // NEW: Y position relative to the app's own content area, so the
+    // top-edge swipe still works when a status bar is visible above it.
+    private float contentY(MotionEvent event) {
+        if (root == null) {
+            return event.getY();
+        }
+        int[] loc = new int[2];
+        root.getLocationOnScreen(loc);
+        return event.getRawY() - loc[1];
+    }
+
     @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
 
@@ -539,15 +633,15 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         if (action == MotionEvent.ACTION_DOWN) {
             if (idleView != null) {
-                idleView.wake();   // resets the auto-dim timer, wakes if dimmed
+                idleView.wake();
             }
-            swipeStartY = event.getY();
+            swipeStartY = contentY(event);
             swipeStartX = event.getX();
         }
 
         else if (action == MotionEvent.ACTION_UP) {
 
-            float deltaY = event.getY() - swipeStartY;
+            float deltaY = contentY(event) - swipeStartY;
             float deltaX = Math.abs(event.getX() - swipeStartX);
 
             if (swipeStartY <= TOP_EDGE_LIMIT
@@ -588,7 +682,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 }
                 idleView.setState(state);
                 applyKeepAwake();
-                showIdle();   // every state except streaming shows the idle screen
+                showIdle();
             }
         });
     }
@@ -632,6 +726,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         destroyed = true;
 
         mainHandler.removeCallbacks(hideOverlayRunnable);
+        mainHandler.removeCallbacks(rehideBarsRunnable);
 
         if (idleView != null) {
             idleView.stop();
