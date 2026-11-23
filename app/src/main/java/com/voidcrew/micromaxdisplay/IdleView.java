@@ -108,7 +108,7 @@ public final class IdleView extends View {
         }
     };
 
-    public IdleView(Context context, AppSettings settings) {
+    public IdleView(Context context, final AppSettings settings) {
         super(context);
         this.settings = settings;
 
