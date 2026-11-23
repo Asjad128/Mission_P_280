@@ -6,15 +6,26 @@
         android:allowBackup="false"
         android:label="Micromax USB Display"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize"
             android:screenOrientation="landscape"
+            android:launchMode="singleTask"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <receiver
+            android:name=".AutoLaunchReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.ACTION_POWER_CONNECTED" />
+            </intent-filter>
+        </receiver>
+
     </application>
 </manifest>

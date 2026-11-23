@@ -3,7 +3,6 @@ package com.voidcrew.micromaxdisplay;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.SharedPreferences;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
@@ -14,9 +13,7 @@ import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.os.BatteryManager;
 import android.text.format.DateFormat;
-import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewConfiguration;
 
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
@@ -26,20 +23,20 @@ import java.util.Random;
 
 public final class IdleView extends View {
 
+    public interface DimListener {
+        void onDimChanged(boolean dimmed);
+    }
+
     private static final long FRAME_DELAY_MS = 33;
+    private static final long DIM_FRAME_DELAY_MS = 1000;
     private static final long SHIFT_INTERVAL_MS = 60000L;
     private static final int SHIFT_RANGE_PX = 24;
 
     // Tune this if the bottom is still hidden by the bezel (0.05 = 5% of height).
     private static final float SAFE_BOTTOM_FRACTION = 0.05f;
 
-    private static final int STYLE_MINIMAL = 0;
     private static final int STYLE_FLIP = 1;
     private static final int STYLE_ANALOG = 2;
-    private static final int STYLE_NIGHT = 3;
-    private static final int STYLE_COUNT = 4;
-
-    private static final String PREFS = "idle_prefs";
 
     private static final float[][] THEMES = {
             {220f, 270f},   // blue / purple
@@ -48,19 +45,14 @@ public final class IdleView extends View {
             {120f, 170f}    // green
     };
 
-    // Night light colors: amber, warm white, red (best for sleep), soft pink.
-    private static final int[] NIGHT_COLORS = {
-            0xFFFFA726,
-            0xFFFFD9A0,
-            0xFFFF3B30,
-            0xFFFF8FB0
-    };
+    private final AppSettings settings;
 
     private final Paint bgPaint = new Paint();
     private final Paint timePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint datePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint statusPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint dotPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint dimPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private final Paint cardPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint flipDigitPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -68,7 +60,6 @@ public final class IdleView extends View {
     private final Paint handPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint batteryPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint batteryTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint nightTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private final RectF rect = new RectF();
     private final Path boltPath = new Path();
@@ -76,33 +67,17 @@ public final class IdleView extends View {
     private final Random random = new Random();
     private final Date date = new Date();
     private final float[] hsv = new float[3];
-    private final SharedPreferences prefs;
-    private final int touchSlop;
 
     private Calendar cal = Calendar.getInstance();
     private SimpleDateFormat timeFormat;
     private SimpleDateFormat dateFormat;
+    private int formatMode = -1;
     private String timeText = "";
     private String dateText = "";
     private long lastMinute = -1;
 
     private String statusText = "";
     private int state = UsbReceiver.STATE_STARTING;
-    private int theme = 0;
-    private int clockStyle = STYLE_MINIMAL;
-
-    // Night light settings.
-    private float nightLevel = 0.5f;          // 0.05 .. 1.0
-    private int nightColorIndex = 0;
-    private int nightTextColor = 0xFFFFFFFF;
-    private String overlayText = "";
-    private long overlayUntil = 0;
-
-    // Drag handling (night light brightness).
-    private float dragStartY;
-    private float dragStartLevel;
-    private boolean dragging = false;
-    private boolean dragAllowed = false;
 
     private long lastShiftTime = 0;
     private float shiftX = 0;
@@ -115,27 +90,27 @@ public final class IdleView extends View {
     private int batteryPercent = -1;
     private boolean charging = false;
 
+    // Auto-dim.
+    private long lastActivity = System.currentTimeMillis();
+    private boolean dimmed = false;
+    private boolean swallowTap = false;
+    private DimListener dimListener;
+
     private final Runnable ticker = new Runnable() {
         @Override
         public void run() {
             if (!running) {
                 return;
             }
+            checkAutoDim(System.currentTimeMillis());
             invalidate();
-            postDelayed(this, FRAME_DELAY_MS);
+            postDelayed(this, dimmed ? DIM_FRAME_DELAY_MS : FRAME_DELAY_MS);
         }
     };
 
-    public IdleView(Context context) {
+    public IdleView(Context context, AppSettings settings) {
         super(context);
-
-        touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
-
-        prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        clockStyle = prefs.getInt("style", STYLE_MINIMAL) % STYLE_COUNT;
-        theme = prefs.getInt("theme", 0) % THEMES.length;
-        nightLevel = prefs.getFloat("nightLevel", 0.5f);
-        nightColorIndex = prefs.getInt("nightColor", 0) % NIGHT_COLORS.length;
+        this.settings = settings;
 
         timePaint.setColor(0xFFFFFFFF);
         timePaint.setTextAlign(Paint.Align.CENTER);
@@ -145,8 +120,9 @@ public final class IdleView extends View {
         datePaint.setTextAlign(Paint.Align.CENTER);
         datePaint.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
 
-        nightTextPaint.setTextAlign(Paint.Align.CENTER);
-        nightTextPaint.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        dimPaint.setColor(0xFF4A4A4A);
+        dimPaint.setTextAlign(Paint.Align.CENTER);
+        dimPaint.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
 
         statusPaint.setColor(0xFFFFFFFF);
         statusPaint.setTextAlign(Paint.Align.CENTER);
@@ -176,29 +152,26 @@ public final class IdleView extends View {
         setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View v) {
-                clockStyle = (clockStyle + 1) % STYLE_COUNT;
-                prefs.edit().putInt("style", clockStyle).apply();
-
-                if (clockStyle == STYLE_NIGHT) {
-                    overlayText = "Swipe up/down: brightness  \u2022  Hold: color";
-                    overlayUntil = System.currentTimeMillis() + 4000;
+                if (swallowTap) {
+                    return;   // this touch only woke the screen
                 }
+                settings.clockStyle =
+                        (settings.clockStyle + 1) % AppSettings.CLOCK_STYLE_COUNT;
+                settings.save();
                 invalidate();
             }
         });
 
-        // Long press = next color (night light color, or background theme).
+        // Long press = next background theme.
         setOnLongClickListener(new OnLongClickListener() {
             @Override
             public boolean onLongClick(View v) {
-                if (clockStyle == STYLE_NIGHT) {
-                    nightColorIndex = (nightColorIndex + 1) % NIGHT_COLORS.length;
-                    prefs.edit().putInt("nightColor", nightColorIndex).apply();
-                } else {
-                    theme = (theme + 1) % THEMES.length;
-                    prefs.edit().putInt("theme", theme).apply();
-                    lastGradientTime = 0;
+                if (swallowTap) {
+                    return true;
                 }
+                settings.theme = (settings.theme + 1) % AppSettings.THEME_COUNT;
+                settings.save();
+                lastGradientTime = 0;
                 invalidate();
                 return true;
             }
@@ -207,12 +180,35 @@ public final class IdleView extends View {
         refreshFormats();
     }
 
-    private void refreshFormats() {
-        boolean is24 = DateFormat.is24HourFormat(getContext());
-        timeFormat = new SimpleDateFormat(is24 ? "HH:mm" : "h:mm", Locale.getDefault());
-        dateFormat = new SimpleDateFormat("EEEE, d MMMM", Locale.getDefault());
-        cal = Calendar.getInstance();
-        lastMinute = -1;
+    // ------------------------------------------------------------- public API
+
+    public void setDimListener(DimListener listener) {
+        dimListener = listener;
+    }
+
+    public boolean isDimmed() {
+        return dimmed;
+    }
+
+    /** Called by the activity on every touch. */
+    public void wake() {
+        lastActivity = System.currentTimeMillis();
+        if (dimmed) {
+            swallowTap = true;
+            setDimmed(false);
+        }
+    }
+
+    public void clearSwallow() {
+        swallowTap = false;
+    }
+
+    /** Called when the idle screen appears or disappears. */
+    public void resetActivity() {
+        lastActivity = System.currentTimeMillis();
+        if (dimmed) {
+            setDimmed(false);
+        }
     }
 
     public void setStatus(String status) {
@@ -221,6 +217,54 @@ public final class IdleView extends View {
 
     public void setState(int newState) {
         state = newState;
+    }
+
+    public void start() {
+        if (running) {
+            return;
+        }
+        running = true;
+        lastBatteryTime = 0;
+        refreshFormats();
+        removeCallbacks(ticker);
+        post(ticker);
+    }
+
+    public void stop() {
+        running = false;
+        removeCallbacks(ticker);
+    }
+
+    // ---------------------------------------------------------------- internals
+
+    private void setDimmed(boolean value) {
+        if (dimmed == value) {
+            return;
+        }
+        dimmed = value;
+        if (dimListener != null) {
+            dimListener.onDimChanged(value);
+        }
+        invalidate();
+    }
+
+    private void checkAutoDim(long now) {
+        boolean should = settings.autoDimEnabled
+                && now - lastActivity >= settings.autoDimMinutes * 60000L;
+        setDimmed(should);
+    }
+
+    private void refreshFormats() {
+        int mode = settings.clockFormat;
+        boolean is24 = mode == AppSettings.CLOCK_24
+                || (mode == AppSettings.CLOCK_SYSTEM
+                && DateFormat.is24HourFormat(getContext()));
+
+        formatMode = mode;
+        timeFormat = new SimpleDateFormat(is24 ? "HH:mm" : "h:mm", Locale.getDefault());
+        dateFormat = new SimpleDateFormat("EEEE, d MMMM", Locale.getDefault());
+        cal = Calendar.getInstance();
+        lastMinute = -1;
     }
 
     private String labelForState() {
@@ -254,22 +298,6 @@ public final class IdleView extends View {
         }
     }
 
-    public void start() {
-        if (running) {
-            return;
-        }
-        running = true;
-        lastBatteryTime = 0;
-        refreshFormats();
-        removeCallbacks(ticker);
-        post(ticker);
-    }
-
-    public void stop() {
-        running = false;
-        removeCallbacks(ticker);
-    }
-
     @Override
     protected void onDetachedFromWindow() {
         stop();
@@ -282,63 +310,6 @@ public final class IdleView extends View {
         lastGradientTime = 0;
     }
 
-    // Vertical drag adjusts night light brightness.
-    @Override
-    public boolean onTouchEvent(MotionEvent e) {
-        if (clockStyle == STYLE_NIGHT) {
-            switch (e.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN:
-                    dragStartY = e.getY();
-                    dragStartLevel = nightLevel;
-                    dragging = false;
-                    // Ignore the top edge so the Exit swipe still works.
-                    dragAllowed = e.getY() > getHeight() * 0.12f;
-                    break;
-
-                case MotionEvent.ACTION_MOVE:
-                    if (dragAllowed) {
-                        float dy = dragStartY - e.getY();
-
-                        if (!dragging && Math.abs(dy) > touchSlop * 2) {
-                            dragging = true;
-
-                            // Cancel the pending tap / long-press.
-                            MotionEvent cancel = MotionEvent.obtain(e);
-                            cancel.setAction(MotionEvent.ACTION_CANCEL);
-                            super.onTouchEvent(cancel);
-                            cancel.recycle();
-                        }
-
-                        if (dragging) {
-                            float level = dragStartLevel + dy / (getHeight() * 0.8f);
-                            nightLevel = Math.max(0.05f, Math.min(1f, level));
-                            overlayText = "Brightness " + Math.round(nightLevel * 100) + "%";
-                            overlayUntil = System.currentTimeMillis() + 1500;
-                            invalidate();
-                            return true;
-                        }
-                    }
-                    break;
-
-                case MotionEvent.ACTION_UP:
-                    if (dragging) {
-                        dragging = false;
-                        prefs.edit().putFloat("nightLevel", nightLevel).apply();
-                        return true;
-                    }
-                    break;
-
-                case MotionEvent.ACTION_CANCEL:
-                    dragging = false;
-                    break;
-
-                default:
-                    break;
-            }
-        }
-        return super.onTouchEvent(e);
-    }
-
     @Override
     protected void onDraw(Canvas canvas) {
         int w = getWidth();
@@ -348,19 +319,20 @@ public final class IdleView extends View {
         }
 
         long now = System.currentTimeMillis();
-
-        if (clockStyle == STYLE_NIGHT) {
-            canvas.drawColor(nightBackground());
-        } else {
-            updateGradient(now, w, h);
-            canvas.drawRect(0, 0, w, h, bgPaint);
-        }
+        float base = Math.min(w, h);
 
         updateTexts(now);
         updateShift(now);
-        updateBattery(now);
 
-        float base = Math.min(w, h);
+        if (dimmed) {
+            drawDimClock(canvas, w, h, base);
+            return;
+        }
+
+        updateGradient(now, w, h);
+        canvas.drawRect(0, 0, w, h, bgPaint);
+
+        updateBattery(now);
 
         datePaint.setTextSize(base * 0.065f);
         statusPaint.setTextSize(base * 0.04f);
@@ -368,15 +340,12 @@ public final class IdleView extends View {
         canvas.save();
         canvas.translate(shiftX, shiftY);
 
-        switch (clockStyle) {
+        switch (settings.clockStyle) {
             case STYLE_FLIP:
                 drawFlipClock(canvas, w, h, base);
                 break;
             case STYLE_ANALOG:
                 drawAnalogClock(canvas, w, h, base, now);
-                break;
-            case STYLE_NIGHT:
-                drawNightLight(canvas, w, h, base, now);
                 break;
             default:
                 drawMinimalClock(canvas, w, h, base);
@@ -389,55 +358,20 @@ public final class IdleView extends View {
         canvas.restore();
     }
 
-    // ----------------------------------------------------------- night light
+    // -------------------------------------------------------------- dim clock
 
-    private static int scaleColor(int color, float scale) {
-        if (scale < 0f) {
-            scale = 0f;
-        }
-        if (scale > 1f) {
-            scale = 1f;
-        }
-        int r = (int) (((color >> 16) & 0xFF) * scale);
-        int g = (int) (((color >> 8) & 0xFF) * scale);
-        int b = (int) ((color & 0xFF) * scale);
-        return 0xFF000000 | (r << 16) | (g << 8) | b;
+    private void drawDimClock(Canvas canvas, int w, int h, float base) {
+        canvas.drawColor(Color.BLACK);
+
+        dimPaint.setTextSize(base * 0.14f);
+
+        canvas.save();
+        canvas.translate(shiftX, shiftY);
+        canvas.drawText(timeText, w / 2f, h / 2f + base * 0.05f, dimPaint);
+        canvas.restore();
     }
 
-    private int nightBackground() {
-        // Squared curve gives finer control at the dim end.
-        float s = Math.max(0.02f, nightLevel * nightLevel);
-        return scaleColor(NIGHT_COLORS[nightColorIndex], s);
-    }
-
-    private void drawNightLight(Canvas canvas, int w, int h, float base, long now) {
-        int lamp = NIGHT_COLORS[nightColorIndex];
-
-        if (nightLevel > 0.5f) {
-            nightTextColor = 0x66000000;   // dark text on a bright lamp
-        } else {
-            nightTextColor = scaleColor(lamp,
-                    Math.min(1f, nightLevel * nightLevel + 0.25f));
-        }
-
-        nightTextPaint.setColor(nightTextColor);
-
-        float cx = w / 2f;
-        float cy = h * 0.50f;
-
-        nightTextPaint.setTextSize(base * 0.26f);
-        canvas.drawText(timeText, cx, cy, nightTextPaint);
-
-        nightTextPaint.setTextSize(base * 0.055f);
-        canvas.drawText(dateText, cx, cy + base * 0.10f, nightTextPaint);
-
-        if (now < overlayUntil && overlayText.length() > 0) {
-            nightTextPaint.setTextSize(base * 0.045f);
-            canvas.drawText(overlayText, cx, h * 0.18f, nightTextPaint);
-        }
-    }
-
-    // ---------------------------------------------------------------- clocks
+    // ----------------------------------------------------------------- clocks
 
     private void drawMinimalClock(Canvas canvas, int w, int h, float base) {
         timePaint.setTextSize(base * 0.38f);
@@ -495,7 +429,6 @@ public final class IdleView extends View {
 
                 canvas.drawText(String.valueOf(ch), x + cardW / 2f, textY, flipDigitPaint);
 
-                // Split line across the middle of the card.
                 float mid = cardTop + cardH / 2f;
                 ringPaint.setColor(0xFF000000);
                 ringPaint.setStrokeWidth(Math.max(2f, cardH * 0.012f));
@@ -515,12 +448,10 @@ public final class IdleView extends View {
         float cy = h * 0.43f;
         float r = base * 0.27f;
 
-        // Dial ring.
         ringPaint.setColor(0xCCFFFFFF);
         ringPaint.setStrokeWidth(r * 0.02f);
         canvas.drawCircle(cx, cy, r, ringPaint);
 
-        // Tick marks.
         for (int i = 0; i < 12; i++) {
             double a = Math.toRadians(i * 30);
             float sin = (float) Math.sin(a);
@@ -565,7 +496,7 @@ public final class IdleView extends View {
                 handPaint);
     }
 
-    // --------------------------------------------------------------- battery
+    // ---------------------------------------------------------------- battery
 
     private void updateBattery(long now) {
         if (now - lastBatteryTime < 10000) {
@@ -613,29 +544,24 @@ public final class IdleView extends View {
         } else if (batteryPercent <= 15) {
             color = 0xFFEF5350;
         } else {
-            // Keep it dim in night light mode.
-            color = (clockStyle == STYLE_NIGHT) ? nightTextColor : 0xFFFFFFFF;
+            color = 0xFFFFFFFF;
         }
 
-        // Outline.
         batteryPaint.setStyle(Paint.Style.STROKE);
         batteryPaint.setStrokeWidth(Math.max(2f, bh * 0.09f));
         batteryPaint.setColor(color);
         rect.set(bodyLeft, top, bodyRight, top + bh);
         canvas.drawRoundRect(rect, bh * 0.15f, bh * 0.15f, batteryPaint);
 
-        // Nub.
         batteryPaint.setStyle(Paint.Style.FILL);
         rect.set(bodyRight, top + bh * 0.3f, bodyRight + nubW, top + bh * 0.7f);
         canvas.drawRect(rect, batteryPaint);
 
-        // Fill level.
         float pad = bh * 0.16f;
         float fillW = (bw - pad * 2f) * batteryPercent / 100f;
         rect.set(bodyLeft + pad, top + pad, bodyLeft + pad + fillW, top + bh - pad);
         canvas.drawRect(rect, batteryPaint);
 
-        // Percentage text.
         batteryTextPaint.setColor(color);
         batteryTextPaint.setTextSize(bh * 0.95f);
         Paint.FontMetrics fm = batteryTextPaint.getFontMetrics();
@@ -644,7 +570,6 @@ public final class IdleView extends View {
         float textY = top + bh / 2f - (fm.ascent + fm.descent) / 2f;
         canvas.drawText(text, textRight, textY, batteryTextPaint);
 
-        // Lightning bolt while charging.
         if (charging) {
             float textW = batteryTextPaint.measureText(text);
             float bx = textRight - textW - bh * 0.55f;
@@ -663,19 +588,16 @@ public final class IdleView extends View {
         }
     }
 
-    // ---------------------------------------------------------------- status
+    // ----------------------------------------------------------------- status
 
     private void drawStatus(Canvas canvas, int w, int h, float base, long now) {
         float cx = w / 2f;
 
-        // Keep status clear of the bezel at the bottom.
         float statusY = h - h * SAFE_BOTTOM_FRACTION - base * 0.075f;
 
-        // Pulse: 0..1 over ~2.4 s.
         float pulse = (float) (0.5 + 0.5 * Math.sin(now / 380.0));
 
-        // Dim the status text in night light mode.
-        statusPaint.setColor(clockStyle == STYLE_NIGHT ? nightTextColor : 0xFFFFFFFF);
+        statusPaint.setColor(0xFFFFFFFF);
 
         String label = labelForState();
         dotPaint.setColor(colorForState());
@@ -707,7 +629,7 @@ public final class IdleView extends View {
         lastGradientTime = now;
 
         float drift = (now / 1000f * 3f) % 360f;
-        float[] t = THEMES[theme];
+        float[] t = THEMES[settings.theme % THEMES.length];
 
         hsv[0] = (t[0] + 30f * (float) Math.sin(Math.toRadians(drift)) + 360f) % 360f;
         hsv[1] = 0.65f;
@@ -723,6 +645,10 @@ public final class IdleView extends View {
     }
 
     private void updateTexts(long now) {
+        if (formatMode != settings.clockFormat) {
+            refreshFormats();
+        }
+
         long minute = now / 60000L;
         if (minute == lastMinute) {
             return;

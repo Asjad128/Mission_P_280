@@ -1,4 +1,3 @@
-
 package com.voidcrew.micromaxdisplay;
 
 import android.content.Context;
@@ -15,8 +14,7 @@ import java.util.Locale;
 public final class FrameRenderer extends View {
 
     private static final String TAG = "FrameRenderer";
-    private static final long STATS_INTERVAL_NS =
-            2_000_000_000L;
+    private static final long STATS_INTERVAL_NS = 2000000000L;
 
     private final Paint paint;
     private final RectF destination = new RectF();
@@ -27,11 +25,14 @@ public final class FrameRenderer extends View {
     private boolean firstDrawLogged = false;
     private boolean stopped = false;
 
+    private int scaleMode = AppSettings.SCALE_FIT;
+
     // Cached destination geometry.
     private int cachedViewWidth = -1;
     private int cachedViewHeight = -1;
     private int cachedFrameWidth = -1;
     private int cachedFrameHeight = -1;
+    private int cachedScaleMode = -1;
 
     // Rendering statistics.
     private long drawStatsStart = System.nanoTime();
@@ -48,14 +49,14 @@ public final class FrameRenderer extends View {
     private int intervalCount = 0;
 
     public interface FrameReleaser {
-    void release(Bitmap bitmap);
+        void release(Bitmap bitmap);
     }
 
     private final FrameReleaser frameReleaser;
 
     public FrameRenderer(
-        Context context,
-        FrameReleaser frameReleaser) {
+            Context context,
+            FrameReleaser frameReleaser) {
 
         super(context);
 
@@ -68,13 +69,27 @@ public final class FrameRenderer extends View {
         setWillNotDraw(false);
     }
 
+    public void setScaleMode(int mode) {
+        if (mode == scaleMode) {
+            return;
+        }
+
+        scaleMode = mode;
+        cachedViewWidth = -1;
+
+        if (latestFrame != null && !latestFrame.isRecycled()) {
+            updateDestination(latestFrame);
+        }
+        invalidate();
+    }
+
     public void displayFrame(Bitmap frame) {
 
         if (frame == null || frame.isRecycled() || stopped) {
             return;
         }
 
-       if (latestFrame != null && latestFrame != frame
+        if (latestFrame != null && latestFrame != frame
                 && !latestFrame.isRecycled()) {
             frameReleaser.release(latestFrame);
         }
@@ -126,32 +141,36 @@ public final class FrameRenderer extends View {
         if (viewWidth == cachedViewWidth
                 && viewHeight == cachedViewHeight
                 && frameWidth == cachedFrameWidth
-                && frameHeight == cachedFrameHeight) {
+                && frameHeight == cachedFrameHeight
+                && scaleMode == cachedScaleMode) {
             return;
         }
 
-        float scale = Math.min(
-                (float) viewWidth / frameWidth,
-                (float) viewHeight / frameHeight
-        );
+        if (scaleMode == AppSettings.SCALE_STRETCH) {
+            destination.set(0, 0, viewWidth, viewHeight);
+        } else {
+            float scaleX = (float) viewWidth / frameWidth;
+            float scaleY = (float) viewHeight / frameHeight;
 
-        float width = frameWidth * scale;
-        float height = frameHeight * scale;
+            // Fit = smaller scale (bars). Fill = larger scale (edges cropped).
+            float scale = scaleMode == AppSettings.SCALE_FILL
+                    ? Math.max(scaleX, scaleY)
+                    : Math.min(scaleX, scaleY);
 
-        float left = (viewWidth - width) / 2.0f;
-        float top = (viewHeight - height) / 2.0f;
+            float width = frameWidth * scale;
+            float height = frameHeight * scale;
 
-        destination.set(
-                left,
-                top,
-                left + width,
-                top + height
-        );
+            float left = (viewWidth - width) / 2.0f;
+            float top = (viewHeight - height) / 2.0f;
+
+            destination.set(left, top, left + width, top + height);
+        }
 
         cachedViewWidth = viewWidth;
         cachedViewHeight = viewHeight;
         cachedFrameWidth = frameWidth;
         cachedFrameHeight = frameHeight;
+        cachedScaleMode = scaleMode;
     }
 
     @Override
@@ -174,15 +193,9 @@ public final class FrameRenderer extends View {
             firstDrawLogged = true;
         }
 
-        canvas.drawBitmap(
-                frame,
-                null,
-                destination,
-                paint
-        );
+        canvas.drawBitmap(frame, null, destination, paint);
 
         long drawEnd = System.nanoTime();
-
         long drawDuration = drawEnd - drawStart;
 
         drawCount++;
@@ -192,9 +205,7 @@ public final class FrameRenderer extends View {
             maxDrawNanos = drawDuration;
         }
 
-        // Measure time between actual onDraw executions.
         if (previousDrawTime != 0) {
-
             long interval = drawStart - previousDrawTime;
 
             totalDrawIntervalNanos += interval;
@@ -211,25 +222,20 @@ public final class FrameRenderer extends View {
 
         if (now - drawStatsStart >= STATS_INTERVAL_NS) {
 
-            double seconds =
-                    (now - drawStatsStart) / 1_000_000_000.0;
-
+            double seconds = (now - drawStatsStart) / 1000000000.0;
             double drawFps = drawCount / seconds;
 
             double avgDrawMs = drawCount > 0
-                    ? (totalDrawNanos / 1_000_000.0) / drawCount
+                    ? (totalDrawNanos / 1000000.0) / drawCount
                     : 0.0;
 
-            double maxDrawMs =
-                    maxDrawNanos / 1_000_000.0;
+            double maxDrawMs = maxDrawNanos / 1000000.0;
 
             double avgIntervalMs = intervalCount > 0
-                    ? (totalDrawIntervalNanos / 1_000_000.0)
-                    / intervalCount
+                    ? (totalDrawIntervalNanos / 1000000.0) / intervalCount
                     : 0.0;
 
-            double maxIntervalMs =
-                    maxDrawIntervalNanos / 1_000_000.0;
+            double maxIntervalMs = maxDrawIntervalNanos / 1000000.0;
 
             Log.i(TAG,
                     String.format(
@@ -265,12 +271,12 @@ public final class FrameRenderer extends View {
 
     public void shutdown() {
 
-            stopped = true;
+        stopped = true;
 
-            if (latestFrame != null && !latestFrame.isRecycled()) {
-                frameReleaser.release(latestFrame);
-            }
-
-            latestFrame = null;
+        if (latestFrame != null && !latestFrame.isRecycled()) {
+            frameReleaser.release(latestFrame);
         }
+
+        latestFrame = null;
+    }
 }

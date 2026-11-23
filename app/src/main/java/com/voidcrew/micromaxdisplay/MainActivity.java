@@ -20,6 +20,8 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     private final Handler mainHandler = new Handler();
     private final Object frameLock = new Object();
 
+    private AppSettings settings;
+
     private FrameLayout root;
     private FrameRenderer renderer;
     private IdleView idleView;
@@ -27,9 +29,10 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     private FrameLayout exitOverlay;
     private UsbReceiver receiver;
 
-    private View nightOverlay;                 // NEW: warm tint / dim layer
-    private NightLightPanel nightPanel;        // NEW: settings card
-    private ImageButton settingsButton;        // NEW: gear on idle screen
+    private View nightOverlay;
+    private SettingsPanel settingsPanel;
+    private ImageButton settingsButton;
+    private int lastOverlayColor = 0;
 
     private Bitmap pendingFrame;
     private boolean frameUpdatePosted = false;
@@ -44,11 +47,24 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     private static final int SWIPE_THRESHOLD = 80;
     private static final int TOP_EDGE_LIMIT = 60;
     private static final long OVERLAY_TIMEOUT = 3000;
+    private static final long NIGHT_TICK_MS = 15000;
 
     private final Runnable hideOverlayRunnable = new Runnable() {
         @Override
         public void run() {
             hideExitOverlay();
+        }
+    };
+
+    // Re-evaluates the night schedule (and ramp) regularly.
+    private final Runnable nightTick = new Runnable() {
+        @Override
+        public void run() {
+            if (destroyed) {
+                return;
+            }
+            applyNightFilter();
+            mainHandler.postDelayed(this, NIGHT_TICK_MS);
         }
     };
 
@@ -113,6 +129,8 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        settings = AppSettings.get(this);
+
         requestWindowFeature(Window.FEATURE_NO_TITLE);
 
         getWindow().setFlags(
@@ -120,15 +138,12 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 WindowManager.LayoutParams.FLAG_FULLSCREEN
         );
 
-        getWindow().addFlags(
-                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-        );
-
         setRequestedOrientation(
                 ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         );
 
         applyFullscreen();
+        applyKeepAwake();
 
         root = new FrameLayout(this);
 
@@ -141,13 +156,21 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                     }
                 }
         );
+        renderer.setScaleMode(settings.scaleMode);
 
         root.addView(renderer, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
         ));
 
-        idleView = new IdleView(this);
+        idleView = new IdleView(this, settings);
+        idleView.setDimListener(new IdleView.DimListener() {
+            @Override
+            public void onDimChanged(boolean dimmed) {
+                applyBacklight(dimmed);
+                updateGear();
+            }
+        });
         root.addView(idleView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -170,8 +193,8 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         root.addView(statusView, statusParams);
 
-        // NEW: night filter sits above the video, idle screen and status.
-        // It is not clickable, so touches pass straight through it.
+        // Night filter: above video, idle screen and status.
+        // Not clickable, so touches pass straight through.
         nightOverlay = new View(this);
         nightOverlay.setVisibility(View.GONE);
         root.addView(nightOverlay, new FrameLayout.LayoutParams(
@@ -181,16 +204,16 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         createExitOverlay();
 
-        // NEW: gear button, visible on the idle screen only.
+        // Gear button on the idle screen.
         settingsButton = new ImageButton(this);
         settingsButton.setImageResource(android.R.drawable.ic_menu_preferences);
         settingsButton.setBackgroundColor(0x00000000);
         settingsButton.setAlpha(0.7f);
-        settingsButton.setContentDescription("Night light settings");
+        settingsButton.setContentDescription("Settings");
         settingsButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                nightPanel.show();
+                settingsPanel.show();
             }
         });
 
@@ -201,21 +224,22 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         gearParams.topMargin = dp(12);
         root.addView(settingsButton, gearParams);
 
-        // NEW: settings card, on top of everything.
-        nightPanel = new NightLightPanel(this, new NightLightPanel.Listener() {
+        // Settings card, on top of everything.
+        settingsPanel = new SettingsPanel(this, settings, new SettingsPanel.Listener() {
             @Override
-            public void onNightLightChanged() {
-                applyNightFilter();
+            public void onSettingsChanged() {
+                applySettings();
             }
         });
-        root.addView(nightPanel, new FrameLayout.LayoutParams(
+        root.addView(settingsPanel, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
         ));
 
-        applyNightFilter();
-
         setContentView(root);
+
+        applyNightFilter();
+        mainHandler.postDelayed(nightTick, NIGHT_TICK_MS);
 
         receiver = new UsbReceiver(this);
         receiver.start();
@@ -227,21 +251,81 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
-    // NEW
+    // ---------------------------------------------------------------- settings
+
+    private void applySettings() {
+        if (renderer != null) {
+            renderer.setScaleMode(settings.scaleMode);
+        }
+        applyNightFilter();
+        applyKeepAwake();
+        if (idleView != null) {
+            idleView.invalidate();
+        }
+    }
+
     private void applyNightFilter() {
-        if (nightOverlay == null || nightPanel == null) {
+        if (nightOverlay == null) {
             return;
         }
 
-        int color = nightPanel.getOverlayColor();
+        int color = settings.nightOverlayColor(System.currentTimeMillis());
 
-        if (nightPanel.isFilterEnabled() && color != 0) {
+        if (color == lastOverlayColor) {
+            return;
+        }
+        lastOverlayColor = color;
+
+        if (color == 0) {
+            nightOverlay.setVisibility(View.GONE);
+        } else {
             nightOverlay.setBackgroundColor(color);
             nightOverlay.setVisibility(View.VISIBLE);
-        } else {
-            nightOverlay.setVisibility(View.GONE);
         }
     }
+
+    private void applyKeepAwake() {
+        boolean connected = connState == UsbReceiver.STATE_CONNECTED
+                || connState == UsbReceiver.STATE_STREAMING;
+
+        boolean keep;
+        switch (settings.keepAwake) {
+            case AppSettings.AWAKE_ALWAYS:
+                keep = true;
+                break;
+            case AppSettings.AWAKE_CONNECTED:
+                keep = connected;
+                break;
+            default:
+                keep = false;
+                break;
+        }
+
+        if (keep) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+    }
+
+    // Lowers the real backlight while the idle screen is auto-dimmed.
+    private void applyBacklight(boolean dimmed) {
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.screenBrightness = dimmed
+                ? 0.03f
+                : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+        getWindow().setAttributes(lp);
+    }
+
+    private void updateGear() {
+        if (settingsButton == null) {
+            return;
+        }
+        boolean show = idleShowing && (idleView == null || !idleView.isDimmed());
+        settingsButton.setVisibility(show ? View.VISIBLE : View.GONE);
+    }
+
+    // -------------------------------------------------------------- idle / status
 
     private void showStatusBriefly() {
         if (statusView == null) {
@@ -262,15 +346,14 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         idleView.animate().cancel();
         idleView.setAlpha(1f);
         idleView.setVisibility(View.VISIBLE);
+        idleView.resetActivity();
         idleView.start();
 
         mainHandler.removeCallbacks(fadeStatusRunnable);
         statusView.animate().cancel();
         statusView.setVisibility(View.GONE);
 
-        if (settingsButton != null) {
-            settingsButton.setVisibility(View.VISIBLE);
-        }
+        updateGear();
     }
 
     private void hideIdle() {
@@ -280,9 +363,8 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         idleShowing = false;
         showStatusBriefly();
 
-        if (settingsButton != null) {
-            settingsButton.setVisibility(View.GONE);
-        }
+        idleView.resetActivity();   // also restores the backlight if it was dimmed
+        updateGear();
 
         idleView.animate()
                 .alpha(0f)
@@ -320,11 +402,10 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         }
     }
 
-    // NEW: Back closes the settings card first.
     @Override
     public void onBackPressed() {
-        if (nightPanel != null && nightPanel.isShowing()) {
-            nightPanel.hide();
+        if (settingsPanel != null && settingsPanel.isShowing()) {
+            settingsPanel.hide();
             return;
         }
         super.onBackPressed();
@@ -341,6 +422,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     @Override
     protected void onResume() {
         super.onResume();
+        applyNightFilter();
         if (idleView != null && idleShowing) {
             idleView.start();
         }
@@ -363,24 +445,24 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         exitOverlay.setBackgroundColor(0xdd202020);
         exitOverlay.setVisibility(View.GONE);
 
-        // NEW: "Night light" button on the left of the swipe-down bar.
-        TextView nightButton = new TextView(this);
-        nightButton.setText("Night light");
-        nightButton.setTextColor(0xffffffff);
-        nightButton.setTextSize(16);
-        nightButton.setGravity(Gravity.CENTER_VERTICAL);
-        nightButton.setPadding(dp(20), 0, dp(20), 0);
-        nightButton.setClickable(true);
-        nightButton.setOnClickListener(new View.OnClickListener() {
+        // "Settings" on the left of the swipe-down bar.
+        TextView settingsLabel = new TextView(this);
+        settingsLabel.setText("Settings");
+        settingsLabel.setTextColor(0xffffffff);
+        settingsLabel.setTextSize(16);
+        settingsLabel.setGravity(Gravity.CENTER_VERTICAL);
+        settingsLabel.setPadding(dp(20), 0, dp(20), 0);
+        settingsLabel.setClickable(true);
+        settingsLabel.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 mainHandler.removeCallbacks(hideOverlayRunnable);
                 hideExitOverlay();
-                nightPanel.show();
+                settingsPanel.show();
             }
         });
 
-        exitOverlay.addView(nightButton, new FrameLayout.LayoutParams(
+        exitOverlay.addView(settingsLabel, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 Gravity.LEFT | Gravity.CENTER_VERTICAL
@@ -453,12 +535,17 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
 
-        if (event.getAction() == MotionEvent.ACTION_DOWN) {
+        int action = event.getAction();
+
+        if (action == MotionEvent.ACTION_DOWN) {
+            if (idleView != null) {
+                idleView.wake();   // resets the auto-dim timer, wakes if dimmed
+            }
             swipeStartY = event.getY();
             swipeStartX = event.getX();
         }
 
-        else if (event.getAction() == MotionEvent.ACTION_UP) {
+        else if (action == MotionEvent.ACTION_UP) {
 
             float deltaY = event.getY() - swipeStartY;
             float deltaX = Math.abs(event.getX() - swipeStartX);
@@ -471,8 +558,18 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
             }
         }
 
-        return super.dispatchTouchEvent(event);
+        boolean handled = super.dispatchTouchEvent(event);
+
+        if (idleView != null
+                && (action == MotionEvent.ACTION_UP
+                || action == MotionEvent.ACTION_CANCEL)) {
+            idleView.clearSwallow();
+        }
+
+        return handled;
     }
+
+    // ------------------------------------------------------- UsbReceiver.Listener
 
     @Override
     public void onStatus(final String status) {
@@ -490,6 +587,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                     return;
                 }
                 idleView.setState(state);
+                applyKeepAwake();
                 showIdle();   // every state except streaming shows the idle screen
             }
         });
