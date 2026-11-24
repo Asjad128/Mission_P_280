@@ -187,8 +187,11 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                     float normalizedX,
                     float normalizedY) {
 
-                // Preserve the existing top-edge exit gesture.
-                if (swipeStartY <= TOP_EDGE_LIMIT) {
+                // Reserve the top strip for the menu only while it is visible.
+                // When the menu is hidden, the desktop remains touchable there.
+                if (exitOverlay != null
+                        && exitOverlay.getVisibility() == View.VISIBLE
+                        && swipeStartY <= TOP_EDGE_LIMIT) {
                     return;
                 }
 
@@ -531,7 +534,11 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     private void createExitOverlay() {
         exitOverlay = new FrameLayout(this);
         exitOverlay.setBackgroundColor(0xdd202020);
+        // Consume touches on empty parts of the bar instead of passing them
+        // through to the desktop renderer while the bar is visible.
+        exitOverlay.setClickable(true);
         exitOverlay.setVisibility(View.GONE);
+        exitOverlay.setAlpha(1.0f);
 
         // Left: Settings.
         TextView settingsLabel = new TextView(this);
@@ -635,14 +642,35 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         updateFullscreenLabel();
         mainHandler.removeCallbacks(hideOverlayRunnable);
+
+        // A new edge swipe or menu interaction cancels any fade already running.
+        exitOverlay.animate().cancel();
+        exitOverlay.setAlpha(1.0f);
         exitOverlay.setVisibility(View.VISIBLE);
+
+        // Keep the bar fully visible for 3 seconds, then fade it away.
         mainHandler.postDelayed(hideOverlayRunnable, OVERLAY_TIMEOUT);
     }
 
     private void hideExitOverlay() {
-        if (exitOverlay != null) {
-            exitOverlay.setVisibility(View.GONE);
+        if (exitOverlay == null || exitOverlay.getVisibility() != View.VISIBLE) {
+            return;
         }
+
+        mainHandler.removeCallbacks(hideOverlayRunnable);
+        exitOverlay.animate().cancel();
+        exitOverlay.animate()
+                .alpha(0.0f)
+                .setDuration(450)
+                .withEndAction(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (exitOverlay != null) {
+                            exitOverlay.setVisibility(View.GONE);
+                            exitOverlay.setAlpha(1.0f);
+                        }
+                    }
+                });
     }
 
     // Y relative to the app's own content area, so the top-edge swipe

@@ -45,287 +45,11 @@ FIT_MODE = "letterbox"
 
 CAPTURE_FPS = 30
 SEND_FPS = 20
-JPEG_QUALITY = 50
+JPEG_QUALITY = 20
 
 SEND_BUFFER = 128 * 1024
 
 FRAME_INTERVAL = 1.0 / SEND_FPS
-
-# --------------------------------------------------
-# TOUCH INPUT PROTOCOL
-# --------------------------------------------------
-
-# TCH1 | action:u8 | pointer_id:u8 | reserved:u16 | x:f32 | y:f32
-TOUCH_PACKET = struct.Struct("!4sBBHff")
-
-TOUCH_ACTIONS = {
-    0: "HELLO",
-    1: "DOWN",
-    2: "MOVE",
-    3: "UP",
-    4: "CANCEL",
-}
-
-
-# --------------------------------------------------
-# WINDOWS MOUSE MOVEMENT
-# --------------------------------------------------
-
-user32 = ctypes.WinDLL("user32", use_last_error=True)
-
-INPUT_MOUSE = 0
-
-MOUSEEVENTF_MOVE = 0x0001
-MOUSEEVENTF_ABSOLUTE = 0x8000
-MOUSEEVENTF_VIRTUALDESK = 0x4000
-
-ULONG_PTR = wintypes.WPARAM
-
-
-class RECT(ctypes.Structure):
-    _fields_ = [
-        ("left", wintypes.LONG),
-        ("top", wintypes.LONG),
-        ("right", wintypes.LONG),
-        ("bottom", wintypes.LONG),
-    ]
-
-
-class MONITORINFOEX(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("rcMonitor", RECT),
-        ("rcWork", RECT),
-        ("dwFlags", wintypes.DWORD),
-        ("szDevice", wintypes.WCHAR * 32),
-    ]
-
-
-class MOUSEINPUT(ctypes.Structure):
-    _fields_ = [
-        ("dx", wintypes.LONG),
-        ("dy", wintypes.LONG),
-        ("mouseData", wintypes.DWORD),
-        ("dwFlags", wintypes.DWORD),
-        ("time", wintypes.DWORD),
-        ("dwExtraInfo", ULONG_PTR),
-    ]
-
-
-class INPUTUNION(ctypes.Union):
-    _fields_ = [
-        ("mi", MOUSEINPUT),
-    ]
-
-
-class INPUT(ctypes.Structure):
-    _anonymous_ = ("u",)
-    _fields_ = [
-        ("type", wintypes.DWORD),
-        ("u", INPUTUNION),
-    ]
-
-
-user32.SendInput.argtypes = [
-    wintypes.UINT,
-    ctypes.POINTER(INPUT),
-    ctypes.c_int,
-]
-user32.SendInput.restype = wintypes.UINT
-
-user32.GetSystemMetrics.argtypes = [ctypes.c_int]
-user32.GetSystemMetrics.restype = ctypes.c_int
-
-
-
-def find_monitor_by_device_name(device_name):
-    monitors = []
-
-    MONITORENUMPROC = ctypes.WINFUNCTYPE(
-        wintypes.BOOL,
-        wintypes.HANDLE,
-        wintypes.HDC,
-        ctypes.POINTER(RECT),
-        wintypes.LPARAM
-    )
-
-    def callback(hmonitor, hdc, rect, data):
-        info = MONITORINFOEX()
-        info.cbSize = ctypes.sizeof(info)
-
-        if user32.GetMonitorInfoW(
-            hmonitor,
-            ctypes.byref(info)
-        ):
-            if info.szDevice.casefold() == device_name.casefold():
-                r = info.rcMonitor
-
-                monitors.append((
-                    r.left,
-                    r.top,
-                    r.right - r.left,
-                    r.bottom - r.top
-                ))
-
-        return True
-
-    callback_ref = MONITORENUMPROC(callback)
-
-    user32.EnumDisplayMonitors(
-        None,
-        None,
-        callback_ref,
-        0
-    )
-
-    if len(monitors) != 1:
-        raise RuntimeError(
-            f"Could not uniquely identify Windows monitor "
-            f"'{device_name}'. Found: {monitors}"
-        )
-
-    return monitors[0]
-
-class WindowsMouse:
-
-    def __init__(self, camera, device_idx, output_idx):
-
-        # Obtain the exact DXGI output selected by DXcam.
-        dxgi_output = getattr(camera, "_output", None)
-
-        if dxgi_output is None:
-            raise RuntimeError(
-                "Could not access the selected DXcam output."
-            )
-
-        # DXcam output descriptor contains the Windows device name.
-        device_name = getattr(
-            dxgi_output,
-            "devicename",
-            None
-        )
-
-        # Compatibility fallback for output descriptor layouts.
-        if not device_name:
-            desc = getattr(dxgi_output, "desc", None)
-
-            if desc is not None:
-                device_name = getattr(
-                    desc,
-                    "DeviceName",
-                    None
-                )
-
-        if not device_name:
-            raise RuntimeError(
-                "DXcam did not expose the selected monitor's "
-                "Windows device name. Check DXcam compatibility."
-            )
-
-        self.monitor_device_name = device_name
-
-        (
-            self.monitor_left,
-            self.monitor_top,
-            self.monitor_width,
-            self.monitor_height
-        ) = find_monitor_by_device_name(device_name)
-
-        self.virtual_left = user32.GetSystemMetrics(76)
-        self.virtual_top = user32.GetSystemMetrics(77)
-        self.virtual_width = user32.GetSystemMetrics(78)
-        self.virtual_height = user32.GetSystemMetrics(79)
-
-        print(
-            f"Mouse target: Device {device_idx}, "
-            f"Output {output_idx} -> {device_name} | "
-            f"{self.monitor_width}x{self.monitor_height} "
-            f"at ({self.monitor_left}, {self.monitor_top})"
-        )
-
-    def map_frame_coordinates(self, nx, ny):
-
-        # Convert normalized coordinates into frame pixels.
-        frame_x = nx * WIDTH
-        frame_y = ny * HEIGHT
-
-        if FIT_MODE == "letterbox":
-
-            scale = min(
-                WIDTH / self.monitor_width,
-                HEIGHT / self.monitor_height
-            )
-
-            content_width = self.monitor_width * scale
-            content_height = self.monitor_height * scale
-
-            pad_x = (WIDTH - content_width) / 2.0
-            pad_y = (HEIGHT - content_height) / 2.0
-
-            # Ignore touches on the sender's black bars.
-            if (
-                frame_x < pad_x
-                or frame_x > pad_x + content_width
-                or frame_y < pad_y
-                or frame_y > pad_y + content_height
-            ):
-                return None
-
-            source_x = (
-                (frame_x - pad_x) / content_width
-            ) * self.monitor_width
-
-            source_y = (
-                (frame_y - pad_y) / content_height
-            ) * self.monitor_height
-
-        else:
-            source_x = nx * self.monitor_width
-            source_y = ny * self.monitor_height
-
-        screen_x = self.monitor_left + source_x
-        screen_y = self.monitor_top + source_y
-
-        return screen_x, screen_y
-
-    def move_to(self, screen_x, screen_y):
-
-        absolute_x = round(
-            (screen_x - self.virtual_left)
-            * 65535 / max(1, self.virtual_width - 1)
-        )
-
-        absolute_y = round(
-            (screen_y - self.virtual_top)
-            * 65535 / max(1, self.virtual_height - 1)
-        )
-
-        mouse_input = MOUSEINPUT(
-            absolute_x,
-            absolute_y,
-            0,
-            (
-                MOUSEEVENTF_MOVE
-                | MOUSEEVENTF_ABSOLUTE
-                | MOUSEEVENTF_VIRTUALDESK
-            ),
-            0,
-            0
-        )
-
-        input_event = INPUT(
-            type=INPUT_MOUSE,
-            mi=mouse_input
-        )
-
-        sent = user32.SendInput(
-            1,
-            ctypes.byref(input_event),
-            ctypes.sizeof(INPUT)
-        )
-
-        if sent != 1:
-            raise ctypes.WinError(ctypes.get_last_error())
 
 
 # --------------------------------------------------
@@ -357,8 +81,6 @@ stats = {
     "dropped_raw": 0,
 }
 
-
-mouse_controller = None
 
 # --------------------------------------------------
 # WINDOWS TIMER RESOLUTION
@@ -673,88 +395,6 @@ def encode_worker():
 
 
 # --------------------------------------------------
-# TOUCH INPUT RECEIVER
-# --------------------------------------------------
-
-def recv_exact(sock, size):
-    data = bytearray()
-
-    while len(data) < size and not stop_event.is_set():
-        try:
-            chunk = sock.recv(size - len(data))
-
-        except socket.timeout:
-            continue
-
-        if not chunk:
-            return None
-
-        data.extend(chunk)
-
-    if len(data) != size:
-        return None
-
-    return bytes(data)
-
-
-
-def touch_reader_worker(sock):
-    print("Touch reader started.")
-
-    try:
-        while not stop_event.is_set():
-
-            packet = recv_exact(sock, TOUCH_PACKET.size)
-
-            if packet is None:
-                break
-
-            magic, action, pointer_id, reserved, x, y = (
-                TOUCH_PACKET.unpack(packet)
-            )
-
-            if magic != b"TCH1":
-                print("Invalid touch packet:", magic)
-                continue
-
-            if action == 0:
-                print("Touch channel ready: Android handshake received.")
-                continue
-
-            action_name = TOUCH_ACTIONS.get(
-                action,
-                f"UNKNOWN({action})"
-            )
-
-            # Step 3A: only the first finger controls the cursor.
-            if pointer_id == 0 and action in (1, 2):
-
-                mapped = mouse_controller.map_frame_coordinates(
-                    x,
-                    y
-                )
-
-                if mapped is not None:
-                    mouse_controller.move_to(
-                        mapped[0],
-                        mapped[1]
-                    )
-
-            print(
-                f"Touch RX | Action: {action_name}"
-                f" | Pointer: {pointer_id}"
-                f" | X: {x:.4f}"
-                f" | Y: {y:.4f}"
-            )
-
-    except OSError as error:
-        if not stop_event.is_set():
-            print("Touch reader error:", error)
-
-    finally:
-        print("Touch reader stopped.")
-
-# --------------------------------------------------
 # TRANSMISSION WORKER
 # --------------------------------------------------
 
@@ -802,13 +442,6 @@ def send_worker():
 
             if sock is None:
                 break
-
-            threading.Thread(
-                target=touch_reader_worker,
-                args=(sock,),
-                daemon=True,
-                name="TouchReader"
-            ).start()
 
         try:
             start = time.perf_counter()
@@ -910,58 +543,6 @@ def find_p280_output():
 
     return None
 
-def resolve_output_selection():
-
-    info, rows = list_outputs()
-
-    # Automatic P280 detection when no indices are configured.
-    if DEVICE_IDX is None and OUTPUT_IDX is None:
-
-        found = find_p280_output()
-
-        if found is None:
-            raise RuntimeError(
-                "No P280-compatible DXGI output found.\n"
-                + info
-            )
-
-        return found
-
-    candidates = rows
-
-    if DEVICE_IDX is not None:
-        candidates = [
-            row for row in candidates
-            if row[0] == DEVICE_IDX
-        ]
-
-    if OUTPUT_IDX is not None:
-        candidates = [
-            row for row in candidates
-            if row[1] == OUTPUT_IDX
-        ]
-
-    elif DEVICE_IDX is not None:
-        # If only the adapter is specified, locate its P280 output.
-        candidates = [
-            row for row in candidates
-            if (row[2], row[3]) in P280_MODES
-        ]
-
-    if len(candidates) != 1:
-        raise RuntimeError(
-            "Could not uniquely resolve the DXcam output.\n"
-            f"DEVICE_IDX: {DEVICE_IDX}\n"
-            f"OUTPUT_IDX: {OUTPUT_IDX}\n"
-            f"Candidates: {candidates}\n\n"
-            "Specify both --device and --output if necessary.\n\n"
-            f"Available outputs:\n{info}"
-        )
-
-    device, output, width, height = candidates[0]
-
-    return device, output, (width, height)
-
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -983,8 +564,7 @@ def parse_args():
 # --------------------------------------------------
 
 def main():
-    global ROTATION, JPEG_QUALITY
-    global DEVICE_IDX, OUTPUT_IDX, mouse_controller
+    global ROTATION, JPEG_QUALITY, DEVICE_IDX, OUTPUT_IDX
 
     args = parse_args()
 
@@ -1025,34 +605,6 @@ def main():
         cv2.setNumThreads(1)
 
         setup_usb()
-
-        # Resolve the exact DXcam adapter/output pair.
-        device, output, resolution = resolve_output_selection()
-
-        print(
-            f"Selected DXGI output: "
-            f"Device {device}, Output {output}, "
-            f"{resolution[0]}x{resolution[1]}"
-        )
-
-        # Initialize DXcam first.
-        camera = dxcam.create(
-            device_idx=device,
-            output_idx=output,
-            output_color="BGR"
-        )
-
-        if camera is None:
-            raise RuntimeError(
-                "DXcam could not initialize virtual display."
-            )
-
-        # Bind mouse input to the exact output selected by DXcam.
-        mouse_controller = WindowsMouse(
-            camera,
-            device,
-            output
-        )
 
         if OUTPUT_IDX is None:
             found = find_p280_output()
@@ -1153,3 +705,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
