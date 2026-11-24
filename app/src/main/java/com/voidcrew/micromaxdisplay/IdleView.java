@@ -98,7 +98,7 @@ public final class IdleView extends View {
     private float safeBottom = SAFE_BOTTOM_FRACTION;
 
     private float targetShiftX;
-    private fload targetShiftY;
+    private float targetShiftY;
 
     private long lastGradientTime = 0;
     private boolean running = false;
