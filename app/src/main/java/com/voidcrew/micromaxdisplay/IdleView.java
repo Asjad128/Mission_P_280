@@ -97,12 +97,17 @@ public final class IdleView extends View {
     private float shiftY = 0;
     private float safeBottom = SAFE_BOTTOM_FRACTION;
 
+    private float targetShiftX;
+    private fload targetShiftY;
+
     private long lastGradientTime = 0;
     private boolean running = false;
 
     private long lastBatteryTime = 0;
     private int batteryPercent = -1;
     private boolean charging = false;
+
+
 
     // Auto-dim.
     private long lastActivity = System.currentTimeMillis();
