@@ -95,6 +95,7 @@ public final class IdleView extends View {
     private long lastShiftTime = 0;
     private float shiftX = 0;
     private float shiftY = 0;
+    private float safeBottom = SAFE_BOTTOM_FRACTION;
 
     private long lastGradientTime = 0;
     private boolean running = false;
@@ -235,6 +236,10 @@ public final class IdleView extends View {
 
     public void setState(int newState) {
         state = newState;
+    }
+    public void setSafeBottomFraction(float fraction) {
+        safeBottom = fraction;
+        invalidate();
     }
 
     public void start() {
@@ -715,7 +720,7 @@ public final class IdleView extends View {
     private void drawStatus(Canvas canvas, int w, int h, float base, long now) {
         float cx = w / 2f;
 
-        float statusY = h - h * SAFE_BOTTOM_FRACTION - base * 0.075f;
+        float statusY = h - h * safeBottom - base * 0.075f;
 
         float pulse = (float) (0.5 + 0.5 * Math.sin(now / 380.0));
 
@@ -783,11 +788,12 @@ public final class IdleView extends View {
 
     // Burn-in protection: nudge content a little every minute.
     private void updateShift(long now) {
-        if (now - lastShiftTime < SHIFT_INTERVAL_MS) {
-            return;
+        if (now - lastShiftTime >= SHIFT_INTERVAL_MS) {
+            lastShiftTime = now;
+            targetShiftX = random.nextInt(SHIFT_RANGE_PX * 2 + 1) - SHIFT_RANGE_PX;
+            targetShiftY = random.nextInt(SHIFT_RANGE_PX * 2 + 1) - SHIFT_RANGE_PX;
         }
-        lastShiftTime = now;
-        shiftX = random.nextInt(SHIFT_RANGE_PX * 2 + 1) - SHIFT_RANGE_PX;
-        shiftY = random.nextInt(SHIFT_RANGE_PX * 2 + 1) - SHIFT_RANGE_PX;
+        shiftX += (targetShiftX - shiftX) * 0.02f;
+        shiftY += (targetShiftY - shiftY) * 0.02f;
     }
 }
