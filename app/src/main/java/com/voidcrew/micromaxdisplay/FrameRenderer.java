@@ -1,4 +1,3 @@
-
 package com.voidcrew.micromaxdisplay;
 
 import android.content.Context;
@@ -18,22 +17,35 @@ import java.util.Set;
 public final class FrameRenderer extends View {
 
     private static final String TAG = "FrameRenderer";
+    private static final boolean LOG_STATS = false;
     private static final long STATS_INTERVAL_NS = 2000000000L;
 
-    // Touch protocol actions. Must match the Windows receiver.
-    private static final int TOUCH_DOWN = 1;
-    private static final int TOUCH_MOVE = 2;
-    private static final int TOUCH_UP = 3;
-    private static final int TOUCH_CANCEL = 4;
+    // Touch protocol actions. Must match UsbReceiver and the Windows sender.
+    public static final int TOUCH_DOWN = 1;
+    public static final int TOUCH_MOVE = 2;
+    public static final int TOUCH_UP = 3;
+    public static final int TOUCH_CANCEL = 4;
+
+    public interface FrameReleaser {
+        void release(Bitmap bitmap);
+    }
+
+    public interface TouchListener {
+        void onTouch(int action, int pointerId, float normalizedX, float normalizedY);
+    }
 
     private final Paint paint;
     private final RectF destination = new RectF();
+    private final FrameReleaser frameReleaser;
 
+    // Pointers whose DOWN was accepted (started inside the image). UI thread only.
+    private final Set<Integer> activePointerIds = new HashSet<Integer>();
+    private final float[] scratch = new float[2];
+
+    private TouchListener touchListener;
     private Bitmap latestFrame;
-
-    private boolean firstFrameLogged = false;
-    private boolean firstDrawLogged = false;
     private boolean stopped = false;
+    private boolean firstFrameLogged = false;
 
     private int scaleMode = AppSettings.SCALE_FIT;
 
@@ -44,46 +56,13 @@ public final class FrameRenderer extends View {
     private int cachedFrameHeight = -1;
     private int cachedScaleMode = -1;
 
-    // Rendering statistics.
-    private long drawStatsStart = System.nanoTime();
-    private long previousDrawTime = 0;
-
+    // Optional draw statistics.
+    private long statsStart = System.nanoTime();
     private int drawCount = 0;
-    private int receivedCount = 0;
+    private long drawNanos = 0;
 
-    private long totalDrawNanos = 0;
-    private long maxDrawNanos = 0;
-
-    private long totalDrawIntervalNanos = 0;
-    private long maxDrawIntervalNanos = 0;
-    private int intervalCount = 0;
-
-    // Tracks pointers that successfully started inside the displayed image.
-    private final Set<Integer> activePointerIds = new HashSet<Integer>();
-
-    public interface FrameReleaser {
-        void release(Bitmap bitmap);
-    }
-
-    public interface TouchListener {
-        void onTouch(
-                int action,
-                int pointerId,
-                float normalizedX,
-                float normalizedY
-        );
-    }
-
-    private final FrameReleaser frameReleaser;
-
-    private TouchListener touchListener;
-
-    public FrameRenderer(
-            Context context,
-            FrameReleaser frameReleaser) {
-
+    public FrameRenderer(Context context, FrameReleaser frameReleaser) {
         super(context);
-
         this.frameReleaser = frameReleaser;
 
         paint = new Paint(Paint.FILTER_BITMAP_FLAG);
@@ -91,9 +70,7 @@ public final class FrameRenderer extends View {
 
         setBackgroundColor(Color.BLACK);
         setWillNotDraw(false);
-
-        // Required to receive touch events.
-        setClickable(true);
+        setClickable(true); // required to receive the full touch stream
     }
 
     public void setTouchListener(TouchListener listener) {
@@ -104,37 +81,29 @@ public final class FrameRenderer extends View {
         if (mode == scaleMode) {
             return;
         }
-
         scaleMode = mode;
         cachedViewWidth = -1;
 
         if (latestFrame != null && !latestFrame.isRecycled()) {
             updateDestination(latestFrame);
         }
-
         invalidate();
     }
 
     public void displayFrame(Bitmap frame) {
-
         if (frame == null || frame.isRecycled() || stopped) {
             return;
         }
 
-        if (latestFrame != null && latestFrame != frame
-                && !latestFrame.isRecycled()) {
+        if (latestFrame != null && latestFrame != frame && !latestFrame.isRecycled()) {
             frameReleaser.release(latestFrame);
         }
-
         latestFrame = frame;
-        receivedCount++;
 
         if (!firstFrameLogged) {
-            Log.d(TAG, "First bitmap received: "
-                    + frame.getWidth() + "x" + frame.getHeight()
-                    + " | Config: " + frame.getConfig());
-
             firstFrameLogged = true;
+            Log.d(TAG, "First bitmap: " + frame.getWidth() + "x" + frame.getHeight()
+                    + " " + frame.getConfig());
         }
 
         updateDestination(frame);
@@ -142,14 +111,8 @@ public final class FrameRenderer extends View {
     }
 
     @Override
-    protected void onSizeChanged(
-            int width,
-            int height,
-            int oldWidth,
-            int oldHeight) {
-
+    protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
         super.onSizeChanged(width, height, oldWidth, oldHeight);
-
         cachedViewWidth = -1;
         cachedViewHeight = -1;
 
@@ -159,10 +122,8 @@ public final class FrameRenderer extends View {
     }
 
     private void updateDestination(Bitmap frame) {
-
         int viewWidth = getWidth();
         int viewHeight = getHeight();
-
         if (viewWidth <= 0 || viewHeight <= 0) {
             return;
         }
@@ -184,24 +145,17 @@ public final class FrameRenderer extends View {
             float scaleX = (float) viewWidth / frameWidth;
             float scaleY = (float) viewHeight / frameHeight;
 
-            // FIT = smaller scale (letterbox bars).
-            // FILL = larger scale (image edges cropped).
+            // FIT = smaller scale (letterbox). FILL = larger scale (cropped).
             float scale = scaleMode == AppSettings.SCALE_FILL
                     ? Math.max(scaleX, scaleY)
                     : Math.min(scaleX, scaleY);
 
             float width = frameWidth * scale;
             float height = frameHeight * scale;
-
             float left = (viewWidth - width) / 2.0f;
             float top = (viewHeight - height) / 2.0f;
 
-            destination.set(
-                    left,
-                    top,
-                    left + width,
-                    top + height
-            );
+            destination.set(left, top, left + width, top + height);
         }
 
         cachedViewWidth = viewWidth;
@@ -213,338 +167,140 @@ public final class FrameRenderer extends View {
 
     @Override
     protected void onDraw(Canvas canvas) {
-
-        long drawStart = System.nanoTime();
-
         super.onDraw(canvas);
 
         Bitmap frame = latestFrame;
-
         if (frame == null || frame.isRecycled()) {
             return;
         }
 
-        if (!firstDrawLogged) {
-            Log.d(TAG, "First draw executed: "
-                    + canvas.getWidth() + "x" + canvas.getHeight());
-
-            firstDrawLogged = true;
-        }
+        long start = LOG_STATS ? System.nanoTime() : 0;
 
         canvas.drawBitmap(frame, null, destination, paint);
 
-        long drawEnd = System.nanoTime();
-        long drawDuration = drawEnd - drawStart;
+        if (LOG_STATS) {
+            long now = System.nanoTime();
+            drawCount++;
+            drawNanos += now - start;
 
-        drawCount++;
-        totalDrawNanos += drawDuration;
-
-        if (drawDuration > maxDrawNanos) {
-            maxDrawNanos = drawDuration;
-        }
-
-        if (previousDrawTime != 0) {
-            long interval = drawStart - previousDrawTime;
-
-            totalDrawIntervalNanos += interval;
-            intervalCount++;
-
-            if (interval > maxDrawIntervalNanos) {
-                maxDrawIntervalNanos = interval;
+            if (now - statsStart >= STATS_INTERVAL_NS) {
+                double seconds = (now - statsStart) / 1000000000.0;
+                Log.i(TAG, String.format(Locale.US,
+                        "Render: %.1f FPS | Avg draw: %.2f ms",
+                        drawCount / seconds,
+                        drawCount > 0 ? (drawNanos / 1000000.0) / drawCount : 0.0));
+                statsStart = now;
+                drawCount = 0;
+                drawNanos = 0;
             }
-        }
-
-        previousDrawTime = drawStart;
-
-        long now = System.nanoTime();
-
-        if (now - drawStatsStart >= STATS_INTERVAL_NS) {
-
-            double seconds = (now - drawStatsStart) / 1000000000.0;
-            double drawFps = drawCount / seconds;
-
-            double avgDrawMs = drawCount > 0
-                    ? (totalDrawNanos / 1000000.0) / drawCount
-                    : 0.0;
-
-            double maxDrawMs = maxDrawNanos / 1000000.0;
-
-            double avgIntervalMs = intervalCount > 0
-                    ? (totalDrawIntervalNanos / 1000000.0)
-                    / intervalCount
-                    : 0.0;
-
-            double maxIntervalMs = maxDrawIntervalNanos / 1000000.0;
-
-            Log.i(TAG,
-                    String.format(
-                            Locale.US,
-                            "Render: %.1f FPS"
-                            + " | Frames received: %d"
-                            + " | Avg draw: %.2f ms"
-                            + " | Max draw: %.2f ms"
-                            + " | Avg draw interval: %.2f ms"
-                            + " | Max draw interval: %.2f ms",
-                            drawFps,
-                            receivedCount,
-                            avgDrawMs,
-                            maxDrawMs,
-                            avgIntervalMs,
-                            maxIntervalMs
-                    )
-            );
-
-            drawStatsStart = now;
-
-            drawCount = 0;
-            receivedCount = 0;
-
-            totalDrawNanos = 0;
-            maxDrawNanos = 0;
-
-            totalDrawIntervalNanos = 0;
-            maxDrawIntervalNanos = 0;
-            intervalCount = 0;
         }
     }
 
-    /**
-     * Converts screen/view coordinates into normalized coordinates
-     * relative to the displayed desktop image.
-     *
-     * For FIT mode, a new DOWN outside the image is rejected.
-     * For an already-active pointer, MOVE and terminal events are
-     * clamped to the image edges.
-     */
-    private boolean mapTouchToFrame(
-            float x,
-            float y,
-            boolean allowOutside,
-            float[] result) {
+    // ------------------------------------------------------------------ touch
 
+    /**
+     * Converts view coordinates to 0..1 coordinates over the displayed image.
+     * A new DOWN in the FIT letterbox bars is rejected; MOVE/UP of an accepted
+     * pointer are clamped to the image edges.
+     */
+    private boolean mapTouchToFrame(float x, float y, boolean isNewTouch, float[] out) {
         if (destination.width() <= 0 || destination.height() <= 0) {
             return false;
         }
 
-        // In FIT mode, ignore a new touch in the letterbox bars.
-        if (!allowOutside && scaleMode == AppSettings.SCALE_FIT) {
-            if (!destination.contains(x, y)) {
-                return false;
-            }
+        if (isNewTouch && scaleMode == AppSettings.SCALE_FIT && !destination.contains(x, y)) {
+            return false;
         }
 
-        float normalizedX =
-                (x - destination.left) / destination.width();
+        float nx = (x - destination.left) / destination.width();
+        float ny = (y - destination.top) / destination.height();
 
-        float normalizedY =
-                (y - destination.top) / destination.height();
-
-        // Clamp coordinates to the desktop image boundaries.
-        normalizedX = Math.max(0.0f, Math.min(1.0f, normalizedX));
-        normalizedY = Math.max(0.0f, Math.min(1.0f, normalizedY));
-
-        result[0] = normalizedX;
-        result[1] = normalizedY;
-
+        out[0] = Math.max(0.0f, Math.min(1.0f, nx));
+        out[1] = Math.max(0.0f, Math.min(1.0f, ny));
         return true;
     }
 
-    private void dispatchTouchToListener(
-            int action,
-            int pointerId,
-            float x,
-            float y,
-            boolean allowOutside) {
-
-        if (touchListener == null) {
-            return;
+    private void dispatchTouch(int action, int pointerId, float x, float y, boolean isNewTouch) {
+        if (touchListener != null && mapTouchToFrame(x, y, isNewTouch, scratch)) {
+            touchListener.onTouch(action, pointerId, scratch[0], scratch[1]);
         }
-
-        float[] coordinates = new float[2];
-
-        if (!mapTouchToFrame(
-                x,
-                y,
-                allowOutside,
-                coordinates)) {
-            return;
-        }
-
-        touchListener.onTouch(
-                action,
-                pointerId,
-                coordinates[0],
-                coordinates[1]
-        );
     }
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
-
         if (stopped || touchListener == null) {
             return super.onTouchEvent(event);
         }
 
-        int action = event.getActionMasked();
-        int actionIndex = event.getActionIndex();
+        switch (event.getActionMasked()) {
 
-        switch (action) {
-
-            case MotionEvent.ACTION_DOWN: {
-                int pointerId = event.getPointerId(0);
-
-                float x = event.getX(0);
-                float y = event.getY(0);
-
-                float[] coordinates = new float[2];
-
-                if (mapTouchToFrame(
-                        x,
-                        y,
-                        false,
-                        coordinates)) {
-
-                    activePointerIds.add(pointerId);
-
-                    touchListener.onTouch(
-                            TOUCH_DOWN,
-                            pointerId,
-                            coordinates[0],
-                            coordinates[1]
-                    );
-                }
-
-                return true;
-            }
-
+            case MotionEvent.ACTION_DOWN:
             case MotionEvent.ACTION_POINTER_DOWN: {
-                int pointerId = event.getPointerId(actionIndex);
+                int index = event.getActionIndex();
+                int pointerId = event.getPointerId(index);
 
-                float x = event.getX(actionIndex);
-                float y = event.getY(actionIndex);
-
-                float[] coordinates = new float[2];
-
-                if (mapTouchToFrame(
-                        x,
-                        y,
-                        false,
-                        coordinates)) {
-
+                if (mapTouchToFrame(event.getX(index), event.getY(index), true, scratch)) {
                     activePointerIds.add(pointerId);
-
-                    touchListener.onTouch(
-                            TOUCH_DOWN,
-                            pointerId,
-                            coordinates[0],
-                            coordinates[1]
-                    );
+                    touchListener.onTouch(TOUCH_DOWN, pointerId, scratch[0], scratch[1]);
                 }
-
                 return true;
             }
 
             case MotionEvent.ACTION_MOVE: {
-
                 for (int i = 0; i < event.getPointerCount(); i++) {
-
                     int pointerId = event.getPointerId(i);
-
-                    if (!activePointerIds.contains(pointerId)) {
-                        continue;
+                    if (activePointerIds.contains(pointerId)) {
+                        dispatchTouch(TOUCH_MOVE, pointerId, event.getX(i), event.getY(i), false);
                     }
-
-                    dispatchTouchToListener(
-                            TOUCH_MOVE,
-                            pointerId,
-                            event.getX(i),
-                            event.getY(i),
-                            true
-                    );
                 }
-
                 return true;
             }
 
-            case MotionEvent.ACTION_POINTER_UP: {
-                int pointerId = event.getPointerId(actionIndex);
-
-                if (activePointerIds.contains(pointerId)) {
-
-                    dispatchTouchToListener(
-                            TOUCH_UP,
-                            pointerId,
-                            event.getX(actionIndex),
-                            event.getY(actionIndex),
-                            true
-                    );
-
-                    activePointerIds.remove(pointerId);
-                }
-
-                return true;
-            }
-
+            case MotionEvent.ACTION_POINTER_UP:
             case MotionEvent.ACTION_UP: {
-                int pointerId = event.getPointerId(0);
+                int index = event.getActionIndex();
+                int pointerId = event.getPointerId(index);
 
-                if (activePointerIds.contains(pointerId)) {
-
-                    dispatchTouchToListener(
-                            TOUCH_UP,
-                            pointerId,
-                            event.getX(0),
-                            event.getY(0),
-                            true
-                    );
-
-                    activePointerIds.remove(pointerId);
+                if (activePointerIds.remove(pointerId)) {
+                    dispatchTouch(TOUCH_UP, pointerId, event.getX(index), event.getY(index), false);
                 }
-
                 return true;
             }
 
-            case MotionEvent.ACTION_CANCEL: {
-
-                // Send CANCEL for every pointer that started successfully.
-                for (int i = 0; i < event.getPointerCount(); i++) {
-
-                    int pointerId = event.getPointerId(i);
-
-                    if (!activePointerIds.contains(pointerId)) {
-                        continue;
-                    }
-
-                    dispatchTouchToListener(
-                            TOUCH_CANCEL,
-                            pointerId,
-                            event.getX(i),
-                            event.getY(i),
-                            true
-                    );
-                }
-
-                activePointerIds.clear();
-
+            case MotionEvent.ACTION_CANCEL:
+                cancelAllTouches();
                 return true;
-            }
 
             default:
                 return true;
         }
     }
 
+    /**
+     * Ends every active touch. The Windows side resets all gesture state on a
+     * single CANCEL, so only one packet is sent.
+     */
+    public void cancelAllTouches() {
+        if (activePointerIds.isEmpty()) {
+            return;
+        }
+
+        int firstPointer = activePointerIds.iterator().next();
+        activePointerIds.clear();
+
+        if (touchListener != null) {
+            touchListener.onTouch(TOUCH_CANCEL, firstPointer, 0.0f, 0.0f);
+        }
+    }
+
     public void shutdown() {
-
         stopped = true;
-
         activePointerIds.clear();
         touchListener = null;
 
         if (latestFrame != null && !latestFrame.isRecycled()) {
             frameReleaser.release(latestFrame);
         }
-
         latestFrame = null;
     }
 }

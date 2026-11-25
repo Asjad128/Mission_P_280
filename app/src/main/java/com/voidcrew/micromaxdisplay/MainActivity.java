@@ -48,11 +48,34 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     // Tracks the window flag so it is only changed when the mode changes.
     private boolean windowFullscreenSet = false;
 
-    private float swipeStartY;
-    private float swipeStartX;
+    // ---- top-edge swipe that opens the menu ----
+    //
+    // A touch that starts in the top strip is HELD back from Windows until we
+    // know what it is:
+    //   - swipe down past the threshold -> open the menu, Windows never sees it
+    //   - tap / sideways / upward move   -> release the held DOWN, normal touch
+    // Without this, every menu swipe was also sent to the desktop as a drag.
+    private static final int EDGE_NONE = 0;
+    private static final int EDGE_HOLD = 1;
+    private static final int EDGE_SWIPE = 2;
 
-    private static final int SWIPE_THRESHOLD = 80;
-    private static final int TOP_EDGE_LIMIT = 60;
+    private int edgeState = EDGE_NONE;
+    private boolean heldDownValid = false;
+    private int heldPointerId;
+    private float heldX;
+    private float heldY;
+
+    private float swipeStartX;
+    private float swipeStartY;
+
+    private int topEdgePx;
+    private int swipeThresholdPx;
+    private int edgeSlopPx;
+
+    private static final int TOP_EDGE_DP = 40;
+    private static final int SWIPE_THRESHOLD_DP = 64;
+    private static final int EDGE_SLOP_DP = 16;
+
     private static final long OVERLAY_TIMEOUT = 3000;
     private static final long NIGHT_TICK_MS = 15000;
 
@@ -112,13 +135,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 return;
             }
 
-            if (destroyed || renderer == null) {
-                releaseFrame(frame);
-                return;
-            }
-
-            if (connState != UsbReceiver.STATE_CONNECTED
-                    && connState != UsbReceiver.STATE_STREAMING) {
+            if (destroyed || renderer == null || !isLinkUp()) {
                 releaseFrame(frame);
                 return;
             }
@@ -142,17 +159,18 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         uiPrefs = getSharedPreferences(AppSettings.PREFS, MODE_PRIVATE);
         fullscreenMode = uiPrefs.getBoolean("fullscreen", true);
 
-        requestWindowFeature(Window.FEATURE_NO_TITLE);
+        topEdgePx = dp(TOP_EDGE_DP);
+        swipeThresholdPx = dp(SWIPE_THRESHOLD_DP);
+        edgeSlopPx = dp(EDGE_SLOP_DP);
 
-        setRequestedOrientation(
-                ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        );
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
 
         applyFullscreen();
         applyKeepAwake();
 
         // Single guarded re-hide: only when the system actually showed the
-        // bars while we are in full-screen mode. No timers, no per-touch calls.
+        // bars while we are in full-screen mode.
         getWindow().getDecorView().setOnSystemUiVisibilityChangeListener(
                 new View.OnSystemUiVisibilityChangeListener() {
                     @Override
@@ -168,50 +186,20 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
         root = new FrameLayout(this);
 
-        renderer = new FrameRenderer(
-                this,
-                new FrameRenderer.FrameReleaser() {
-                    @Override
-                    public void release(Bitmap bitmap) {
-                        releaseFrame(bitmap);
-                    }
-                }
-        );
-        renderer.setScaleMode(settings.scaleMode);
-
-        renderer.setTouchListener(new FrameRenderer.TouchListener() {
+        renderer = new FrameRenderer(this, new FrameRenderer.FrameReleaser() {
             @Override
-            public void onTouch(
-                    int action,
-                    int pointerId,
-                    float normalizedX,
-                    float normalizedY) {
-
-                // Reserve the top strip for the menu only while it is visible.
-                // When the menu is hidden, the desktop remains touchable there.
-                if (exitOverlay != null
-                        && exitOverlay.getVisibility() == View.VISIBLE
-                        && swipeStartY <= TOP_EDGE_LIMIT) {
-                    return;
-                }
-
-                if (receiver != null
-                        && (connState == UsbReceiver.STATE_CONNECTED
-                        || connState == UsbReceiver.STATE_STREAMING)) {
-
-                    receiver.sendTouchEvent(
-                            action,
-                            pointerId,
-                            normalizedX,
-                            normalizedY
-                    );
-                }
+            public void release(Bitmap bitmap) {
+                releaseFrame(bitmap);
             }
         });
-        root.addView(renderer, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-        ));
+        renderer.setScaleMode(settings.scaleMode);
+        renderer.setTouchListener(new FrameRenderer.TouchListener() {
+            @Override
+            public void onTouch(int action, int pointerId, float x, float y) {
+                handleRendererTouch(action, pointerId, x, y);
+            }
+        });
+        root.addView(renderer, matchParent());
 
         idleView = new IdleView(this, settings);
         idleView.setSafeBottomFraction(
@@ -223,34 +211,23 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 updateGear();
             }
         });
-        root.addView(idleView, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-        ));
+        root.addView(idleView, matchParent());
 
         statusView = new TextView(this);
         statusView.setText("Starting receiver...");
         statusView.setTextColor(0xffffffff);
         statusView.setTextSize(16.0f);
         statusView.setGravity(Gravity.CENTER);
-        statusView.setPadding(12, 8, 12, 8);
+        statusView.setPadding(dp(8), dp(6), dp(8), dp(6));
         statusView.setBackgroundColor(0xaa000000);
-
-        FrameLayout.LayoutParams statusParams =
-                new FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.WRAP_CONTENT,
-                        FrameLayout.LayoutParams.WRAP_CONTENT,
-                        Gravity.TOP | Gravity.CENTER_HORIZONTAL
-                );
-
-        root.addView(statusView, statusParams);
+        root.addView(statusView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.CENTER_HORIZONTAL));
 
         nightOverlay = new View(this);
         nightOverlay.setVisibility(View.GONE);
-        root.addView(nightOverlay, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-        ));
+        root.addView(nightOverlay, matchParent());
 
         createExitOverlay();
 
@@ -266,9 +243,8 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
             }
         });
 
-        FrameLayout.LayoutParams gearParams =
-                new FrameLayout.LayoutParams(dp(52), dp(52),
-                        Gravity.TOP | Gravity.LEFT);
+        FrameLayout.LayoutParams gearParams = new FrameLayout.LayoutParams(
+                dp(52), dp(52), Gravity.TOP | Gravity.LEFT);
         gearParams.leftMargin = dp(12);
         gearParams.topMargin = dp(12);
         root.addView(settingsButton, gearParams);
@@ -279,10 +255,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 applySettings();
             }
         });
-        root.addView(settingsPanel, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-        ));
+        root.addView(settingsPanel, matchParent());
 
         setContentView(root);
 
@@ -295,8 +268,20 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         showIdle();
     }
 
+    private static FrameLayout.LayoutParams matchParent() {
+        return new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT);
+    }
+
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private boolean isLinkUp() {
+        int state = connState;
+        return state == UsbReceiver.STATE_CONNECTED
+                || state == UsbReceiver.STATE_STREAMING;
     }
 
     // ------------------------------------------------------------- full screen
@@ -327,7 +312,7 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 flags |= View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
             }
 
-            decor.setSystemUiVisibility(flags);   // no-op if unchanged
+            decor.setSystemUiVisibility(flags);
         } else {
             if (windowFullscreenSet) {
                 getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
@@ -374,7 +359,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         }
 
         int color = settings.nightOverlayColor(System.currentTimeMillis());
-
         if (color == lastOverlayColor) {
             return;
         }
@@ -389,16 +373,13 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     }
 
     private void applyKeepAwake() {
-        boolean connected = connState == UsbReceiver.STATE_CONNECTED
-                || connState == UsbReceiver.STATE_STREAMING;
-
         boolean keep;
         switch (settings.keepAwake) {
             case AppSettings.AWAKE_ALWAYS:
                 keep = true;
                 break;
             case AppSettings.AWAKE_CONNECTED:
-                keep = connected;
+                keep = isLinkUp();
                 break;
             default:
                 keep = false;
@@ -483,10 +464,11 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 });
     }
 
+    // --------------------------------------------------------------- lifecycle
+
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-
         if (hasFocus) {
             applyFullscreen();
         }
@@ -503,6 +485,14 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
     @Override
     protected void onPause() {
+        // A finger may still be down when we lose the screen: release it on
+        // Windows too, otherwise the desktop is left with a stuck mouse button.
+        edgeState = EDGE_NONE;
+        heldDownValid = false;
+        if (renderer != null) {
+            renderer.cancelAllTouches();
+        }
+
         if (idleView != null) {
             idleView.stop();
         }
@@ -531,67 +521,60 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         }
     }
 
+    // ------------------------------------------------------------ exit overlay
+
+    private TextView menuLabel(String text, int gravity) {
+        TextView label = new TextView(this);
+        label.setText(text);
+        label.setTextColor(0xffffffff);
+        label.setTextSize(16);
+        label.setGravity(gravity);
+        label.setPadding(dp(20), 0, dp(20), 0);
+        label.setClickable(true);
+        return label;
+    }
+
     private void createExitOverlay() {
         exitOverlay = new FrameLayout(this);
         exitOverlay.setBackgroundColor(0xdd202020);
-        // Consume touches on empty parts of the bar instead of passing them
-        // through to the desktop renderer while the bar is visible.
+        // Consume touches on empty parts of the bar so they never reach the desktop.
         exitOverlay.setClickable(true);
         exitOverlay.setVisibility(View.GONE);
-        exitOverlay.setAlpha(1.0f);
 
         // Left: Settings.
-        TextView settingsLabel = new TextView(this);
-        settingsLabel.setText("Settings");
-        settingsLabel.setTextColor(0xffffffff);
-        settingsLabel.setTextSize(16);
-        settingsLabel.setGravity(Gravity.CENTER_VERTICAL);
-        settingsLabel.setPadding(dp(20), 0, dp(20), 0);
-        settingsLabel.setClickable(true);
+        TextView settingsLabel = menuLabel("Settings", Gravity.CENTER_VERTICAL);
         settingsLabel.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                mainHandler.removeCallbacks(hideOverlayRunnable);
                 hideExitOverlay();
                 settingsPanel.show();
             }
         });
-
         exitOverlay.addView(settingsLabel, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
-                Gravity.LEFT | Gravity.CENTER_VERTICAL
-        ));
+                Gravity.LEFT | Gravity.CENTER_VERTICAL));
 
-        // Center: Exit full screen / Full screen.
-        fullscreenLabel = new TextView(this);
-        fullscreenLabel.setTextColor(0xffffffff);
-        fullscreenLabel.setTextSize(16);
-        fullscreenLabel.setGravity(Gravity.CENTER);
-        fullscreenLabel.setPadding(dp(20), 0, dp(20), 0);
-        fullscreenLabel.setClickable(true);
+        // Center: Full screen toggle.
+        fullscreenLabel = menuLabel("", Gravity.CENTER);
         fullscreenLabel.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                mainHandler.removeCallbacks(hideOverlayRunnable);
                 hideExitOverlay();
                 setFullscreenMode(!fullscreenMode);
             }
         });
         updateFullscreenLabel();
-
         exitOverlay.addView(fullscreenLabel, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
-                Gravity.CENTER
-        ));
+                Gravity.CENTER));
 
         // Right: Exit.
         ImageButton exitButton = new ImageButton(this);
         exitButton.setImageResource(android.R.drawable.ic_menu_close_clear_cancel);
         exitButton.setBackgroundColor(0x00000000);
         exitButton.setContentDescription("Exit application");
-
         exitButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -599,14 +582,9 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
             }
         });
 
-        FrameLayout.LayoutParams buttonParams =
-                new FrameLayout.LayoutParams(
-                        56,
-                        56,
-                        Gravity.RIGHT | Gravity.CENTER_VERTICAL
-                );
-
-        buttonParams.rightMargin = 12;
+        FrameLayout.LayoutParams buttonParams = new FrameLayout.LayoutParams(
+                dp(48), dp(48), Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        buttonParams.rightMargin = dp(12);
         exitOverlay.addView(exitButton, buttonParams);
 
         TextView exitLabel = new TextView(this);
@@ -615,24 +593,15 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         exitLabel.setTextSize(16);
         exitLabel.setGravity(Gravity.CENTER_VERTICAL);
 
-        FrameLayout.LayoutParams labelParams =
-                new FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.WRAP_CONTENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        Gravity.RIGHT | Gravity.CENTER_VERTICAL
-                );
-
-        labelParams.rightMargin = 76;
+        FrameLayout.LayoutParams labelParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        labelParams.rightMargin = dp(64);
         exitOverlay.addView(exitLabel, labelParams);
 
-        FrameLayout.LayoutParams overlayParams =
-                new FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        72,
-                        Gravity.TOP
-                );
-
-        root.addView(exitOverlay, overlayParams);
+        root.addView(exitOverlay, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, dp(56), Gravity.TOP));
     }
 
     private void showExitOverlay() {
@@ -643,21 +612,20 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         updateFullscreenLabel();
         mainHandler.removeCallbacks(hideOverlayRunnable);
 
-        // A new edge swipe or menu interaction cancels any fade already running.
         exitOverlay.animate().cancel();
         exitOverlay.setAlpha(1.0f);
         exitOverlay.setVisibility(View.VISIBLE);
 
-        // Keep the bar fully visible for 3 seconds, then fade it away.
         mainHandler.postDelayed(hideOverlayRunnable, OVERLAY_TIMEOUT);
     }
 
     private void hideExitOverlay() {
+        mainHandler.removeCallbacks(hideOverlayRunnable);
+
         if (exitOverlay == null || exitOverlay.getVisibility() != View.VISIBLE) {
             return;
         }
 
-        mainHandler.removeCallbacks(hideOverlayRunnable);
         exitOverlay.animate().cancel();
         exitOverlay.animate()
                 .alpha(0.0f)
@@ -673,8 +641,14 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 });
     }
 
-    // Y relative to the app's own content area, so the top-edge swipe
-    // keeps working when a bar is visible above it.
+    private boolean overlayVisible() {
+        return exitOverlay != null && exitOverlay.getVisibility() == View.VISIBLE;
+    }
+
+    // ------------------------------------------------------------------- touch
+
+    // Y relative to the app's own content area, so the top-edge swipe keeps
+    // working when a system bar is visible above it.
     private float contentY(MotionEvent event) {
         if (root == null) {
             return event.getY();
@@ -684,38 +658,102 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
         return event.getRawY() - loc[1];
     }
 
-    @Override
-    public boolean dispatchTouchEvent(MotionEvent event) {
-
-        int action = event.getAction();
-
-        if (action == MotionEvent.ACTION_DOWN) {
-            if (idleView != null) {
-                idleView.wake();
-            }
-            swipeStartY = contentY(event);
-            swipeStartX = event.getX();
+    /** Called by FrameRenderer for every accepted touch; forwards it to Windows. */
+    private void handleRendererTouch(int action, int pointerId, float x, float y) {
+        if (receiver == null || !isLinkUp()) {
+            return;
         }
 
-        else if (action == MotionEvent.ACTION_UP) {
+        switch (edgeState) {
+            case EDGE_SWIPE:
+                return; // menu gesture: keep it away from the desktop
 
-            float deltaY = contentY(event) - swipeStartY;
-            float deltaX = Math.abs(event.getX() - swipeStartX);
+            case EDGE_HOLD:
+                if (action == FrameRenderer.TOUCH_DOWN && !heldDownValid) {
+                    heldPointerId = pointerId;
+                    heldX = x;
+                    heldY = y;
+                    heldDownValid = true;
+                }
+                return;
 
-            if (swipeStartY <= TOP_EDGE_LIMIT
-                    && deltaY >= SWIPE_THRESHOLD
-                    && deltaY > deltaX) {
+            default:
+                receiver.sendTouchEvent(action, pointerId, x, y);
+        }
+    }
 
-                showExitOverlay();
-            }
+    /** The touch turned out not to be a menu swipe: send the DOWN we held back. */
+    private void releaseEdgeHold() {
+        edgeState = EDGE_NONE;
+
+        if (heldDownValid && receiver != null && isLinkUp()) {
+            receiver.sendTouchEvent(
+                    FrameRenderer.TOUCH_DOWN, heldPointerId, heldX, heldY);
+        }
+        heldDownValid = false;
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        int action = event.getActionMasked();
+
+        switch (action) {
+            case MotionEvent.ACTION_DOWN:
+                if (idleView != null) {
+                    idleView.wake();
+                }
+                swipeStartX = event.getRawX();
+                swipeStartY = contentY(event);
+                heldDownValid = false;
+                edgeState = (swipeStartY <= topEdgePx
+                        && !overlayVisible()
+                        && (settingsPanel == null || !settingsPanel.isShowing()))
+                        ? EDGE_HOLD : EDGE_NONE;
+                break;
+
+            case MotionEvent.ACTION_POINTER_DOWN:
+                // A second finger means this is a real touch, not a menu swipe.
+                if (edgeState == EDGE_HOLD) {
+                    releaseEdgeHold();
+                }
+                break;
+
+            case MotionEvent.ACTION_MOVE:
+                if (edgeState == EDGE_HOLD) {
+                    float dy = contentY(event) - swipeStartY;
+                    float dx = Math.abs(event.getRawX() - swipeStartX);
+
+                    if (dy >= swipeThresholdPx && dy > dx) {
+                        edgeState = EDGE_SWIPE;
+                        heldDownValid = false;
+                        showExitOverlay();
+                    } else if (dx > edgeSlopPx || dy < -edgeSlopPx
+                            || (dy > edgeSlopPx && dy <= dx)) {
+                        releaseEdgeHold();
+                    }
+                }
+                break;
+
+            case MotionEvent.ACTION_UP:
+                // Finger lifted without a swipe: it was a tap at the top edge.
+                if (edgeState == EDGE_HOLD) {
+                    releaseEdgeHold();
+                }
+                break;
+
+            default:
+                break;
         }
 
         boolean handled = super.dispatchTouchEvent(event);
 
-        if (idleView != null
-                && (action == MotionEvent.ACTION_UP
-                || action == MotionEvent.ACTION_CANCEL)) {
-            idleView.clearSwallow();
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            edgeState = EDGE_NONE;
+            heldDownValid = false;
+
+            if (idleView != null) {
+                idleView.clearSwallow();
+            }
         }
 
         return handled;
@@ -738,6 +776,14 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
                 if (destroyed || idleView == null) {
                     return;
                 }
+
+                // The link dropped: make sure no finger is left "down" on the desktop.
+                if (state != UsbReceiver.STATE_CONNECTED
+                        && state != UsbReceiver.STATE_STREAMING
+                        && renderer != null) {
+                    renderer.cancelAllTouches();
+                }
+
                 idleView.setState(state);
                 applyKeepAwake();
                 showIdle();
@@ -747,13 +793,11 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
     @Override
     public void onFrame(final Bitmap frame) {
-
         if (frame == null || frame.isRecycled()) {
             return;
         }
 
         synchronized (frameLock) {
-
             if (destroyed) {
                 releaseFrame(frame);
                 return;
@@ -780,10 +824,9 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
 
     @Override
     protected void onDestroy() {
-
         destroyed = true;
 
-        mainHandler.removeCallbacks(hideOverlayRunnable);
+        mainHandler.removeCallbacksAndMessages(null);
 
         if (idleView != null) {
             idleView.stop();
@@ -798,11 +841,8 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
             if (pendingFrame != null && !pendingFrame.isRecycled()) {
                 releaseFrame(pendingFrame);
             }
-
             pendingFrame = null;
         }
-
-        mainHandler.removeCallbacksAndMessages(null);
 
         if (renderer != null) {
             renderer.shutdown();
@@ -813,7 +853,6 @@ public final class MainActivity extends Activity implements UsbReceiver.Listener
     }
 
     private void updateStatus(final String status) {
-
         if (destroyed) {
             return;
         }
